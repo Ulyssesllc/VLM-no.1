@@ -1,0 +1,12 @@
+# Treat text files normally
+* text=auto
+
+# Large binary assets - recommend using Git LFS for these patterns
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+
+# Prevent exporting large dataset files in archives
+"datasets Adidas Samba/" export-ignore
+datasets*/ export-ignore

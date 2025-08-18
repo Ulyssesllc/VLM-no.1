@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+ENV/
+.env
+.venv
+
+# Editor directories
+.vscode/
+
+# Data sets (large) - prefer external storage or Git LFS
+datasets*/
+"datasets Adidas Samba/"
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git attributes and LFS hints
