@@ -27,6 +27,7 @@ import pandas as pd
 from transformers import BertTokenizer
 
 from Contrastive import Q_cons_fusion
+from PIL import ImageDraw, ImageFont
 
 try:
     from MLP import MLP_fusion  # type: ignore
@@ -59,40 +60,31 @@ def parse_args():
     )
     p.add_argument("--sample-strategy", choices=["random", "first"], default="random")
     # Console visualization flags (mirroring amazon script)
+    # Tắt toàn bộ ASCII (người dùng không cần). Các tham số cũ bỏ.
+    # Thêm tuỳ chọn hiển thị / lưu ảnh màu thật kèm overlay.
     p.add_argument(
-        "--ascii-preview",
-        action="store_true",
-        help="Print ASCII art preview for each image",
+        "--show", action="store_true", help="Mở cửa sổ xem ảnh với overlay kết quả"
     )
     p.add_argument(
-        "--color-ascii",
-        action="store_true",
-        help="Use ANSI truecolor blocks for preview (needs 24-bit terminal)",
+        "--save-dir",
+        type=str,
+        default=None,
+        help="Thư mục để lưu ảnh gốc kèm overlay kết quả (tạo nếu chưa có)",
     )
     p.add_argument(
-        "--ascii-width",
-        type=int,
-        default=40,
-        help="Width (characters) for ASCII preview",
-    )
-    # Không xuất file riêng theo yêu cầu – chỉ hiển thị console
-    p.add_argument(
-        "--ascii-source",
-        choices=["original", "transformed"],
-        default="original",
-        help="Dùng ảnh gốc hay ảnh đã transform cho ASCII preview",
+        "--no-overlay", action="store_true", help="Không vẽ overlay, chỉ copy ảnh"
     )
     p.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Ngưỡng xác suất để phân loại real/fake (>= threshold => positive-label)",
+        default=0.45,
+        help="Ngưỡng xác suất để phân loại (>= threshold => positive-label). Mặc định 0.45 theo yêu cầu.",
     )
     p.add_argument(
         "--positive-label",
         type=str,
-        default="real",
-        help="Tên lớp dương (ví dụ 'real'). Không phân biệt hoa thường.",
+        default="fake",
+        help="Tên lớp dương (ví dụ 'fake'). Không phân biệt hoa thường.",
     )
     p.add_argument(
         "--only-decision",
@@ -200,52 +192,37 @@ def predict(model, device, batch_imgs, batch_text_inputs, model_type):
     return F.softmax(logits, dim=1)
 
 
-############################################################
-# ASCII RENDER HELPERS (mirroring amazon console script)    #
-############################################################
-def tensor_to_ascii(t: torch.Tensor, width: int = 40) -> str:
-    mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
-    std = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
-    x = (t.cpu() * std + mean).clamp(0, 1)
-    g = 0.299 * x[0] + 0.587 * x[1] + 0.114 * x[2]
-    h, w = g.shape
-    aspect = h / w
-    new_w = width
-    new_h = max(1, int(aspect * new_w * 0.55))
-    g_resized = torch.nn.functional.interpolate(
-        g.unsqueeze(0).unsqueeze(0),
-        size=(new_h, new_w),
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze()
-    chars = " .:-=+*#%@"
-    idx = (g_resized * (len(chars) - 1)).round().long()
-    lines = ["".join(chars[i] for i in row) for row in idx]
-    return "\n" + "\n".join(lines)
-
-
-def tensor_to_color_ascii(t: torch.Tensor, width: int = 40) -> str:
-    mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
-    std = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
-    x = (t.cpu() * std + mean).clamp(0, 1)
-    h, w = x.shape[1:]
-    aspect = h / w
-    new_w = width
-    new_h = max(1, int(aspect * new_w * 0.55))
-    x_resized = torch.nn.functional.interpolate(
-        x.unsqueeze(0), size=(new_h, new_w), mode="bilinear", align_corners=False
-    ).squeeze(0)
-    lines: List[str] = []
-    for row in range(new_h):
-        parts = []
-        for col in range(new_w):
-            r = int(x_resized[0, row, col].item() * 255)
-            g = int(x_resized[1, row, col].item() * 255)
-            b = int(x_resized[2, row, col].item() * 255)
-            parts.append(f"\x1b[48;2;{r};{g};{b}m ")
-        parts.append("\x1b[0m")
-        lines.append("".join(parts))
-    return "\n" + "\n".join(lines)
+def draw_overlay(pil_img: Image.Image, lines: List[str]) -> Image.Image:
+    if pil_img.mode != "RGBA":
+        base = pil_img.convert("RGBA")
+    else:
+        base = pil_img.copy()
+    draw = ImageDraw.Draw(base)
+    # Try to load a truetype font; fallback to default
+    try:
+        font = ImageFont.truetype("arial.ttf", size=max(14, base.width // 40))
+    except Exception:
+        font = ImageFont.load_default()
+    pad = 6
+    # Compute box size
+    text_blocks = []
+    max_w = 0
+    total_h = 0
+    for line in lines:
+        w, h = draw.textsize(line, font=font)
+        max_w = max(max_w, w)
+        total_h += h + 2
+        text_blocks.append((line, w, h))
+    box_w = max_w + pad * 2
+    box_h = total_h + pad * 2
+    # Semi-transparent rectangle
+    overlay = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 140))
+    base.paste(overlay, (0, 0), overlay)
+    y = pad
+    for line, w, h in text_blocks:
+        draw.text((pad, y), line, fill=(255, 255, 255, 255), font=font)
+        y += h + 2
+    return base.convert("RGB")
 
 
 def main():
@@ -308,7 +285,6 @@ def main():
     }
     probs = predict(model, device, batch_imgs, tokenized, args.model_type)
 
-    warned_color = False
     for i, (_idx, row) in enumerate(samples.iterrows()):
         p = probs[i]
         topv, topi = p.topk(min(args.top_k, p.size(0)))
@@ -345,43 +321,68 @@ def main():
             ]
         )
 
-        if args.ascii_preview and not args.only_decision:
-            # Chọn nguồn ảnh cho ASCII
-            if args.ascii_source == "original":
-                pil_img = origs[i][1]
-                orig_tensor = transforms.ToTensor()(pil_img)
-                mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
-                std = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
-                ascii_tensor = (orig_tensor - mean) / std
-            else:
-                ascii_tensor = batch_imgs[i].cpu()
-            if args.color_ascii:
-                if not warned_color:
-                    print(
-                        "[Info] Using ANSI truecolor blocks; ensure terminal supports 24-bit color."
-                    )
-                    warned_color = True
-                print(tensor_to_color_ascii(ascii_tensor, args.ascii_width))
-            else:
-                print(tensor_to_ascii(ascii_tensor, args.ascii_width))
-
         if args.only_decision:
             # In một dòng: index, decision, p_pos, topk (label:prob,...)
             topk_inline = ";".join(
                 [f"{label_map_inv.get(idx, idx)}:{val:.3f}" for val, idx in topk_pairs]
             )
             print(f"{i}\t{decision}\t{pos_prob:.4f}\t{topk_inline}")
-            continue
+        else:
+            img_path_display = origs[i][0]
+            print(f"--- Sample {i} ---")
+            print(f"Image: {img_path_display}")
+            print(f"GT | Pred(top1): {gt} | {pred_name}")
+            print(
+                f"Decision(threshold={args.threshold:.2f} on '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})"
+            )
+            print(f"TopK: {topk_str}")
+            # In toàn bộ xác suất các lớp (nếu số lớp nhỏ hợp lý)
+            if p.numel() <= 20:
+                all_probs_line = ", ".join(
+                    [
+                        f"{label_map_inv.get(ci, str(ci))}:{p[ci].item():.3f}"
+                        for ci in range(p.numel())
+                    ]
+                )
+                print(f"All probs: {all_probs_line}")
+            txt = texts[i]
+            trunc_txt = txt[:300] + ("..." if len(txt) > 300 else "")
+            print(f"Text: {trunc_txt}")
 
-        print(f"--- Sample {i} ---")
-        print(f"GT | Pred(top1): {gt} | {pred_name}")
-        print(
-            f"Decision(threshold={args.threshold:.2f} on '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})"
-        )
-        print(f"TopK: {topk_str}")
-        txt = texts[i]
-        trunc_txt = txt[:300] + ("..." if len(txt) > 300 else "")
-        print(f"Text: {trunc_txt}")
+            # Lưu / hiển thị ảnh màu gốc nếu người dùng yêu cầu
+            if args.show or args.save_dir:
+                pil_img = origs[i][1].copy()
+                if not args.no_overlay:
+                    overlay_lines = [
+                        f"GT: {gt}",
+                        f"Pred: {pred_name}",
+                        f"Decision: {decision}",
+                        f"p_pos: {pos_prob:.3f}",
+                    ]
+                    # Thêm top1 / topk line
+                    overlay_lines.append(
+                        "TopK: "
+                        + ", ".join(
+                            [
+                                f"{label_map_inv.get(idx, idx)}:{val:.2f}"
+                                for val, idx in topk_pairs
+                            ]
+                        )
+                    )
+                    pil_img = draw_overlay(pil_img, overlay_lines)
+                if args.save_dir:
+                    os.makedirs(args.save_dir, exist_ok=True)
+                    out_name = os.path.basename(img_path_display)
+                    out_path = os.path.join(args.save_dir, f"{i:02d}_" + out_name)
+                    try:
+                        pil_img.save(out_path)
+                    except Exception as e:
+                        print(f"[Warn] Không lưu được {out_path}: {e}")
+                if args.show:
+                    try:
+                        pil_img.show(title=f"sample_{i}")
+                    except Exception:
+                        pass
 
     # Không lưu file – chỉ hiển thị theo yêu cầu
 

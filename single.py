@@ -7,7 +7,7 @@ from process_data import MyData
 from torch.utils.data import DataLoader
 import torch
 from torch.optim import Adam
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast  # keep autocast import for autocast context
 import pandas as pd
 import argparse
 from sklearn.metrics import precision_score, recall_score, f1_score
@@ -18,25 +18,52 @@ if not os.path.isfile(MASTER_CSV):
     raise FileNotFoundError(MASTER_CSV)
 df = pd.read_csv(MASTER_CSV, sep=";")
 label_map = {label: idx for idx, label in enumerate(df["label"].unique())}
-train_dataset = MyData(MASTER_CSV, "adidas_dataset", label_map, split="train")
-test_dataset = MyData(MASTER_CSV, "adidas_dataset", label_map, split="test")
 
 
+def _safe_collate(batch):
+    """Collate only fixed-size tensor fields to avoid resize issues.
+
+    Ignores any unexpected / variable-sized keys if present.
+    """
+    keys = ["image", "input_ids", "attention_mask", "label"]
+    collated = {}
+    for k in keys:
+        try:
+            collated[k] = torch.stack([sample[k] for sample in batch])
+        except Exception as e:
+            raise RuntimeError(f"Failed to collate key '{k}': {e}")
+    return collated
+
+
+# Disable returning variable-sized originals to keep batches uniform
+train_dataset = MyData(
+    MASTER_CSV, "adidas_dataset", label_map, split="train", return_original=False
+)
+test_dataset = MyData(
+    MASTER_CSV, "adidas_dataset", label_map, split="test", return_original=False
+)
+
+
+_AUTO_NUM_WORKERS = max(
+    1, min(8, os.cpu_count() or 1)
+)  # more portable than hard-coded 32
 train_data = DataLoader(
     train_dataset,
-    batch_size=128,
+    batch_size=64,  # lowered a bit for stability / memory
     shuffle=True,
-    num_workers=32,
+    num_workers=_AUTO_NUM_WORKERS,
     pin_memory=True,
     drop_last=True,
+    collate_fn=_safe_collate,
 )
 test_data = DataLoader(
     test_dataset,
-    batch_size=128,
+    batch_size=64,
     shuffle=False,
-    num_workers=32,
+    num_workers=_AUTO_NUM_WORKERS,
     pin_memory=True,
     drop_last=True,
+    collate_fn=_safe_collate,
 )
 
 print("hi")
@@ -145,7 +172,10 @@ def train(model, dataloader, epochs=10, args=None):
     criterion = nn.CrossEntropyLoss()
     optimizer = Adam(model.parameters(), lr=1e-4, weight_decay=0.01)
 
-    scaler = GradScaler("cuda")
+    # Updated per PyTorch deprecation: use torch.amp.GradScaler with device type
+    scaler = torch.amp.GradScaler(
+        device_type="cuda" if torch.cuda.is_available() else "cpu"
+    )
 
     for epoch in range(epochs):
         model.train()
