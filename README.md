@@ -68,11 +68,6 @@ Best model saved as `CONFIG.checkpoint_dir/best_model.pth` with:
 - (optionally) scaler_state
 - best_acc
 
-## Future Improvements
-- Rename `visualize_glami.py`
-- Remove / archive legacy scripts (`prepare_glami.py`, `attention_model.py`, `solve_problem.py`)
-- Add validation split handling & early stopping on validation rather than test
-- Unified wrapper interface for auxiliary architectures
 
 ## Troubleshooting
 | Issue | Fix |

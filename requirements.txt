@@ -1,6 +1,22 @@
-# Core deep learning stack
-torch==2.4.1+cpu
-torchvision==0.19.1+cpu
+#############################
+# Core Deep Learning Stack  #
+#############################
+# NOTE: Install PyTorch (torch / torchvision [/ torchaudio]) FIRST to match your hardware.
+# Choose ONE of the following (examples):
+# 1) CPU only:
+#    pip install torch==2.6.0+cpu torchvision==0.21.0+cpu --index-url https://download.pytorch.org/whl/cpu
+# 2) CUDA 12.4:
+#    pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+# 3) CUDA 12.1:
+#    pip install torch==2.6.0+cu121 torchvision==0.21.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+# (Optional) torchaudio matching the same version if you need audio features.
+
+# After installing torch / torchvision, install the rest via:
+#    pip install -r requirements.txt
+
+#############################
+# Remaining Dependencies    #
+#############################
 
 # Model / vision utilities
 timm==1.0.15
@@ -21,5 +37,12 @@ Pillow==11.0.0
 # Progress bars
 tqdm==4.67.1
 
-# Optional: if you use Jupyter or notebooks, uncomment
+# (Optional) Jupyter / dev tools:
 # jupyter
+# ipywidgets
+
+# (Optional) accelerate for HF distributed training
+# accelerate
+
+# (Optional) safetensors to speed HF model loading
+# safetensors

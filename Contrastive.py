@@ -4,9 +4,12 @@ import torch
 import torch.nn as nn
 from transformers import BertModel
 
-print(torch.cuda.is_available())
-print(torch.cuda.device_count())
-print(torch.cuda.get_device_name(0))
+# Optional debug (guarded to avoid crashes on CPU-only builds)
+# if torch.cuda.is_available():
+#     try:
+#         print(f"CUDA devices: {torch.cuda.device_count()} | First: {torch.cuda.get_device_name(0)}")
+#     except Exception:
+#         pass
 
 
 class ImageEncoder(nn.Module):
