@@ -1,0 +1,25 @@
+# Core deep learning stack
+torch==2.4.1+cpu
+torchvision==0.19.1+cpu
+
+# Model / vision utilities
+timm==1.0.15
+
+# NLP
+transformers==4.55.2
+
+# Data processing
+pandas==2.2.2
+numpy==2.0.2
+
+# Metrics & ML utils
+scikit-learn==1.6.1
+
+# Image
+Pillow==11.0.0
+
+# Progress bars
+tqdm==4.67.1
+
+# Optional: if you use Jupyter or notebooks, uncomment
+# jupyter
