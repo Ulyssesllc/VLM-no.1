@@ -209,7 +209,21 @@ def draw_overlay(pil_img: Image.Image, lines: List[str]) -> Image.Image:
     max_w = 0
     total_h = 0
     for line in lines:
-        w, h = draw.textsize(line, font=font)
+        # Pillow >=10: use textbbox; fallback to font.getbbox / getsize
+        try:
+            bbox = draw.textbbox((0, 0), line, font=font)  # (left, top, right, bottom)
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+        except Exception:
+            try:
+                bbox = font.getbbox(line)  # type: ignore[attr-defined]
+                w = bbox[2] - bbox[0]
+                h = bbox[3] - bbox[1]
+            except Exception:
+                try:
+                    w, h = font.getsize(line)  # deprecated but fallback
+                except Exception:
+                    w, h = (len(line) * 8, 14)
         max_w = max(max_w, w)
         total_h += h + 2
         text_blocks.append((line, w, h))
