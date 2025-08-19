@@ -1,10 +1,3 @@
-# Adidas Fake vs Real Multimodal Classification
-
-Multimodal (image + text) classification pipeline migrated from a GLAMI-1M prototype to an adidas fake/real dataset. Supports multiple fusion architectures (contrastive, MLP fusion, Q-former style, bottleneck MoE variants, single-modality baselines).
-
-## Dataset
-Single CSV at `adidas_dataset/labels.csv` with semicolon delimiter:
-```
 # Phân Loại Đa Phương Thức Adidas Fake vs Real
 
 Pipeline phân loại đa phương thức (ảnh + văn bản) được chuyển đổi từ prototype GLAMI-1M sang bộ dữ liệu adidas (fake / real). Hỗ trợ nhiều kiến trúc hợp nhất (contrastive, MLP fusion, Q-former style, bottleneck MoE, baseline đơn modality).
