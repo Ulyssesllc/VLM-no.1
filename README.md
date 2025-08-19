@@ -46,7 +46,7 @@ python single.py --model-train Single_Image --epochs 10
 ```
 
 ## Visualization
-`visualize_glami.py` currently prints predictions with ASCII previews; can be renamed to `visualize_adidas.py` (future cleanup).
+`visualize_adidas.py` currently prints predictions with ASCII previews.
 
 ## Key Files
 - `process_data.py`: Dataset + label_map utilities
