@@ -5,56 +5,63 @@ Multimodal (image + text) classification pipeline migrated from a GLAMI-1M proto
 ## Dataset
 Single CSV at `adidas_dataset/labels.csv` with semicolon delimiter:
 ```
+# Phân Loại Đa Phương Thức Adidas Fake vs Real
+
+Pipeline phân loại đa phương thức (ảnh + văn bản) được chuyển đổi từ prototype GLAMI-1M sang bộ dữ liệu adidas (fake / real). Hỗ trợ nhiều kiến trúc hợp nhất (contrastive, MLP fusion, Q-former style, bottleneck MoE, baseline đơn modality).
+
+## Dữ Liệu
+Một file CSV duy nhất tại `adidas_dataset/labels.csv` với dấu phân tách `;`:
+```
 img_path;description;label_id;label;split
 ```
-- `img_path`: relative path to image inside `adidas_dataset/`
-- `description`: product textual description (can be empty)
-- `label`: class name (e.g. `fake` / `real`)
-- `split`: `train`, `test` (and optionally `val` if added later)
+- `img_path`: đường dẫn tương đối tới ảnh (bên trong `adidas_dataset/`)
+- `description`: mô tả văn bản sản phẩm (có thể trống)
+- `label`: tên lớp (`fake` / `real`)
+- `split`: `train`, `test` (và có thể `val` nếu bổ sung sau)
 
-Images are stored in subfolders (e.g. `adidas_dataset/fake/`, `adidas_dataset/real/`). The code only needs the relative path from the CSV.
+Ảnh nằm trong các thư mục con (ví dụ `adidas_dataset/fake/`, `adidas_dataset/real/`). Code chỉ cần đường dẫn tương đối từ CSV.
 
-## Installation
+## Cài Đặt
 ```bash
-# (Optional) create a fresh environment
+# (Tuỳ chọn) tạo môi trường mới
 conda create -n adidas_vlm python=3.10 -y
 conda activate adidas_vlm
 
-# Install requirements
+# Cài thư viện còn lại
 pip install -r requirements.txt
 ```
 
-## Training (Multimodal)
+## Huấn Luyện (Đa Phương Thức)
 ```bash
 python train.py --model Q_cons_fusion --epochs 15
 ```
-Available `--model` options:
-- `Q_cons_fusion` (default): ViT + multilingual BERT with contrastive + CE loss
-- `MLP_fusion`: ResNet18 + BERT (simple fusion)
-- `Q_former_fusion`: Query-based cross-attention fusion
-- `Q_bottleneck`: Q-bottleneck + internal MoE (wrapper for training loop)
-- `MoE`: Separate Cross-IT + MoE model (wrapped)
+Các tuỳ chọn `--model`:
+- `Q_cons_fusion` (mặc định): ViT + BERT đa ngôn ngữ (loss contrastive + CrossEntropy)
+- `MLP_fusion`: ResNet18 + BERT (fusion đơn giản)
+- `Q_former_fusion`: Hợp nhất qua query cross-attention
+- `Q_bottleneck`: Kiến trúc Q-bottleneck + MoE nội bộ (wrapper)
+- `MoE`: Mô hình Cross-IT + MoE độc lập (wrapper)
 
-All use dynamic number of classes inferred from CSV.
+Tất cả tự động suy ra số lớp từ CSV.
 
-Logs and checkpoints go to directories defined in `config.py` (see `CONFIG.log_dir`, `CONFIG.checkpoint_dir`).
+Log và checkpoint lưu tại thư mục trong `config.py` (`CONFIG.log_dir`, `CONFIG.checkpoint_dir`).
 
-## Single-Modality Baselines
+## Baseline Đơn Modal
 ```bash
 python single.py --model-train Single_Text  --epochs 10
 python single.py --model-train Single_Image --epochs 10
 ```
 
-## Visualization
-`visualize_adidas.py` hiển thị dự đoán trên một tập mẫu bằng ASCII (đen trắng hoặc màu true‑color) không tạo file.
+## Trực Quan Hoá
+`visualize_adidas.py` hiển thị dự đoán trên một tập mẫu bằng ASCII (đen trắng hoặc true‑color) không tạo file.
 
-Ví dụ cơ bản (dùng checkpoint tốt nhất sau huấn luyện):
+Ví dụ cơ bản (dùng checkpoint tốt nhất):
 ```bash
 python visualize_adidas.py \
    --checkpoint checkpoints/best_model.pth
 ```
 
-Ví dụ đầy đủ hơn:
+Ví dụ đầy đủ:
 ```bash
 python visualize_adidas.py \
    --checkpoint checkpoints/best_model.pth \
@@ -69,50 +76,58 @@ python visualize_adidas.py \
 ```
 
 Tham số chính:
-- `--checkpoint`: (bắt buộc) đường dẫn file mô hình `.pth`.
+- `--checkpoint`: (bắt buộc) đường dẫn file `.pth`.
 - `--model-type`: `Q_cons_fusion` | `MLP_fusion`.
 - `--num-samples`: số mẫu hiển thị.
 - `--sample-strategy`: `random` hoặc `first`.
-- `--ascii-preview`: bật render ASCII.
-- `--color-ascii`: dùng block màu (cần terminal hỗ trợ 24‑bit color).
-- `--ascii-width`: chiều rộng ký tự khi scale ảnh.
+- `--ascii-preview`: bật hiển thị ASCII.
+- `--color-ascii`: dùng block màu (cần terminal 24‑bit color).
+- `--ascii-width`: độ rộng ký tự khi scale ảnh.
 
-Mẹo: nếu terminal bị “loang” màu sau block màu, chạy `reset` hoặc đảm bảo script in `\x1b[0m` (đã có sẵn).
+Mẹo: nếu màu sắc vẫn còn trong terminal sau khi in block màu, chạy `reset`.
 
-## Cấu hình (config.py)
-Tất cả siêu tham số tập trung trong `config.py` (dataclass `GlamiConfig`). Bạn thay đổi trực tiếp giá trị, sau đó chạy lại `train.py`.
+## Cấu Hình (`config.py`)
+Mọi siêu tham số nằm trong `config.py` (dataclass `GlamiConfig`). Sửa giá trị rồi chạy lại `train.py`.
 
-Các trường chính:
+Trường chính:
 - `batch_size`, `lr`, `epochs`, `weight_decay`
 - `scheduler`: `cosine | plateau | none`
-- `patience`: early stopping (dựa test acc hiện tại)
-- `grad_clip`: gradient clipping nếu > 0
+- `patience`: early stopping (dựa test accuracy)
+- `grad_clip`: cắt gradient nếu > 0
 - `mixed_precision`: bật AMP (autocast + GradScaler)
 - `num_workers`, `pin_memory`: DataLoader
 - `log_dir`, `checkpoint_dir`
 
-Muốn override qua CLI? (hiện chưa hỗ trợ) → có thể mở rộng bằng cách thêm các `add_argument` và gán vào `CONFIG` trước khi tạo DataLoader.
+Có thể mở rộng để truyền qua CLI (chưa hiện thực).
 
-## Key Files
-- `process_data.py`: Dataset + label_map utilities
-- `train.py`: Main multimodal training entry point
-- `single.py`: Image-only or text-only baseline trainer
-- `Contrastive.py`, `MLP.py`, `Q_former.py`, `Q_bottleneck.py`, `MoE.py`: Model architectures
-- `config.py`: Hyperparameters and paths
+## Các File Chính
+- `process_data.py`: Dataset & label_map
+- `train.py`: Điểm vào huấn luyện đa modal
+- `single.py`: Huấn luyện baseline đơn modal
+- `Contrastive.py`, `MLP.py`, `Q_former.py`, `Q_bottleneck.py`, `MoE.py`: Kiến trúc mô hình
+- `config.py`: Siêu tham số & đường dẫn
 
-## Adding a New Model
-1. Implement a class with forward signature `(image, input_ids, attention_mask)` returning either:
-   - `(logits, img_feat, text_feat)` for contrastive loss, or
-   - `logits` (then adapt `train1` or create a wrapper like existing ones).
-2. Add import and option to the `--model` choices in `train.py`.
+## Thêm Mô Hình Mới
+1. Tạo lớp có `forward(image, input_ids, attention_mask)` trả về:
+    - `(logits, img_feat, text_feat)` nếu muốn dùng thêm contrastive loss, hoặc
+    - `logits` (khi đó dùng hàm huấn luyện kiểu `train1` hay wrapper tương tự).
+2. Thêm import và tên vào danh sách `--model` trong `train.py`.
 
-## Checkpoints
-Best model saved as `CONFIG.checkpoint_dir/best_model.pth` with:
-- model_state
-- optimizer_state
-- (optionally) scaler_state
-- best_acc
+## Checkpoint
+Checkpoint tốt nhất lưu tại `CONFIG.checkpoint_dir/best_model.pth` gồm:
+- `model_state`
+- `optimizer_state`
+- (nếu dùng AMP) `scaler_state`
+- `best_acc`
 
+## Xử Lý Sự Cố (Troubleshooting)
+| Vấn đề | Cách khắc phục |
+|--------|----------------|
+| OOM (CUDA) | Giảm `CONFIG.batch_size`, tắt mixed precision, hoặc chọn mô hình nhỏ hơn |
+| Tokenizer tải thất bại | Bảo đảm có internet lần đầu hoặc cache model HuggingFace |
+| Sai số lớp | Chạy lại `train.py` sau khi chỉnh CSV để tái tạo label_map |
+| Môi trường chỉ CPU | Cài bản torch/torchvision CPU phù hợp trước rồi mới `pip install -r requirements.txt` |
+| Lỗi in tên GPU khi không có CUDA | Đã bỏ gọi thẳng `torch.cuda.get_device_name(0)` trong mã mới – pull phiên bản mới nhất |
 
-## License
-Released under the MIT License. See the `LICENSE` file for full text.
+## Giấy Phép
+Phát hành theo MIT License. Xem chi tiết trong file `LICENSE`.
