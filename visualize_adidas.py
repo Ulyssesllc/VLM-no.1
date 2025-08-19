@@ -1,16 +1,14 @@
-"""Console visualization for adidas_dataset models (Q_cons_fusion / MLP_fusion).
+"""Visualization / reporting for adidas_dataset models.
 
+CLI ví dụ:
+    python visualize_adidas.py --checkpoint ckpt.pth --model-type Q_cons_fusion \
+        --train-csv adidas_dataset/labels.csv --test-csv adidas_dataset/labels.csv \
+        --images adidas_dataset --num-samples 8 --show --export-grid
 
-Example:
-    python visualize_adidas.py \
-        --checkpoint checkpoints/best_model.pth \
-        --model-type Q_cons_fusion \
-        --train-csv adidas_dataset/labels.csv \
-        --test-csv adidas_dataset/labels.csv \
-        --images adidas_dataset \
-        --num-samples 6 --top-k 5 --ascii-preview --color-ascii
-
-
+Trong notebook:
+    from visualize_adidas import parse_args, run_visualization
+    args = parse_args()
+    meta, imgs, grid = run_visualization(args)
 """
 
 from __future__ import annotations
@@ -25,9 +23,32 @@ from torchvision import transforms
 from PIL import Image
 import pandas as pd
 from transformers import BertTokenizer
-
 from Contrastive import Q_cons_fusion
 from PIL import ImageDraw, ImageFont
+import io
+import base64
+import json
+
+
+def _in_notebook() -> bool:
+    try:
+        from IPython import get_ipython  # type: ignore
+
+        return get_ipython() is not None
+    except Exception:
+        return False
+
+
+def _notebook_display(img):  # pragma: no cover
+    if not _in_notebook():
+        return
+    try:
+        from IPython.display import display  # type: ignore
+
+        display(img)
+    except Exception:
+        pass
+
 
 try:
     from MLP import MLP_fusion  # type: ignore
@@ -59,9 +80,6 @@ def parse_args():
         help="Column used as text input where needed",
     )
     p.add_argument("--sample-strategy", choices=["random", "first"], default="random")
-    # Console visualization flags (mirroring amazon script)
-    # Tắt toàn bộ ASCII (người dùng không cần). Các tham số cũ bỏ.
-    # Thêm tuỳ chọn hiển thị / lưu ảnh màu thật kèm overlay.
     p.add_argument(
         "--show", action="store_true", help="Mở cửa sổ xem ảnh với overlay kết quả"
     )
@@ -75,10 +93,48 @@ def parse_args():
         "--no-overlay", action="store_true", help="Không vẽ overlay, chỉ copy ảnh"
     )
     p.add_argument(
+        "--export-grid",
+        action="store_true",
+        help="Xuất 1 ảnh tổng hợp (grid) các mẫu (dùng overlay nếu không tắt)",
+    )
+    p.add_argument(
+        "--mpl-grid",
+        action="store_true",
+        help="Hiển thị grid bằng matplotlib (inline nếu notebook)",
+    )
+    p.add_argument(
+        "--inline-html",
+        action="store_true",
+        help="Hiển thị inline HTML grid ảnh gốc + thông số (notebook). Không chỉnh sửa ảnh.",
+    )
+    p.add_argument(
+        "--grid-cols",
+        type=int,
+        default=4,
+        help="Số cột cho grid khi --export-grid",
+    )
+    p.add_argument(
+        "--html-report",
+        type=str,
+        default=None,
+        help="Tạo file HTML nhúng base64 ảnh & thông tin dự đoán",
+    )
+    p.add_argument(
+        "--json-report",
+        type=str,
+        default=None,
+        help="Tạo file JSON metadata kết quả (đường dẫn / xác suất)",
+    )
+    p.add_argument(
+        "--no-console",
+        action="store_true",
+        help="Không in thông tin mẫu ra stdout (dùng khi chỉ tạo báo cáo)",
+    )
+    p.add_argument(
         "--threshold",
         type=float,
-        default=0.45,
-        help="Ngưỡng xác suất để phân loại (>= threshold => positive-label). Mặc định 0.45 theo yêu cầu.",
+        default=0.40,
+        help="Ngưỡng xác suất để phân loại (>= threshold => positive-label). Mặc định 0.40.",
     )
     p.add_argument(
         "--positive-label",
@@ -103,7 +159,8 @@ def parse_args():
 def set_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def build_label_map(train_csv: str) -> Dict[str, int]:
@@ -139,13 +196,10 @@ def build_transform():
 
 
 def strip_module(state_dict):
-    new_sd = {}
-    for k, v in state_dict.items():
-        if k.startswith("module."):
-            new_sd[k[len("module.") :]] = v
-        else:
-            new_sd[k] = v
-    return new_sd
+    return {
+        (k[len("module.") :] if k.startswith("module.") else k): v
+        for k, v in state_dict.items()
+    }
 
 
 def load_model(args, num_classes: int):
@@ -162,11 +216,13 @@ def load_model(args, num_classes: int):
     sd = ckpt.get("model_state", ckpt)
     sd = strip_module(sd)
     missing, unexpected = model.load_state_dict(sd, strict=False)
-    if missing:
-        print(f"[Warn] Missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
-    if unexpected:
+    if missing and not args.no_console:
         print(
-            f"[Warn] Unexpected keys: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}"
+            f"[Warn] Missing keys (partial): {missing[:5]}{'...' if len(missing) > 5 else ''}"
+        )
+    if unexpected and not args.no_console:
+        print(
+            f"[Warn] Unexpected keys (partial): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}"
         )
     model.eval().to(device)
     return model, device
@@ -198,7 +254,6 @@ def draw_overlay(pil_img: Image.Image, lines: List[str]) -> Image.Image:
     else:
         base = pil_img.copy()
     draw = ImageDraw.Draw(base)
-    # Try to load a truetype font; fallback to default
     try:
         font = ImageFont.truetype("arial.ttf", size=max(14, base.width // 40))
     except Exception:
@@ -229,7 +284,6 @@ def draw_overlay(pil_img: Image.Image, lines: List[str]) -> Image.Image:
         text_blocks.append((line, w, h))
     box_w = max_w + pad * 2
     box_h = total_h + pad * 2
-    # Semi-transparent rectangle
     overlay = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 140))
     base.paste(overlay, (0, 0), overlay)
     y = pad
@@ -239,66 +293,56 @@ def draw_overlay(pil_img: Image.Image, lines: List[str]) -> Image.Image:
     return base.convert("RGB")
 
 
-def main():
-    args = parse_args()
+def run_visualization(args):
+    """Trả về (list_meta, list_PIL_images, grid_image|None)."""
     set_seed(args.seed)
-
     label_map = build_label_map(args.train_csv)
     label_map_inv = {v: k for k, v in label_map.items()}
-    # Xác định lớp dương (positive)
     pos_label_norm = args.positive_label.strip().lower()
-    positive_index = None
-    for idx, name in label_map_inv.items():
-        if str(name).lower() == pos_label_norm:
-            positive_index = idx
-            break
-    if positive_index is None:
-        # fallback: nếu không tìm thấy, chọn index 0
-        positive_index = 0
-        print(
-            f"[Warn] Không tìm thấy lớp '{args.positive_label}', dùng lớp index 0: {label_map_inv[0]}"
-        )
-    # Xác định tên lớp còn lại (negative)
+    positive_index = next(
+        (i for i, n in label_map_inv.items() if str(n).lower() == pos_label_norm), 0
+    )
+    if (
+        positive_index == 0
+        and str(label_map_inv[0]).lower() != pos_label_norm
+        and not args.no_console
+    ):
+        print(f"[Warn] Không tìm thấy '{args.positive_label}', dùng {label_map_inv[0]}")
     if len(label_map_inv) == 2:
-        negative_index = 1 - positive_index
-        negative_label = label_map_inv[negative_index]
+        negative_label = label_map_inv[1 - positive_index]
     else:
-        # nếu nhiều hơn 2 lớp, negative_label chỉ để hiển thị
         negative_label = ",".join(
             [label_map_inv[i] for i in label_map_inv if i != positive_index]
         )
     samples = load_samples(args.test_csv, args.num_samples, args.sample_strategy)
-
     transform = build_transform()
     tokenizer = BertTokenizer.from_pretrained("bert-base-multilingual-cased")
-
-    images = []
-    origs = []  # (original_path, PIL.Image)
-    texts: List[str] = []
+    images_t, origs, texts = [], [], []
     for _, row in samples.iterrows():
+        raw_path = row["img_path"]
         img_path = (
-            os.path.join(args.images, row["img_path"])
-            if not os.path.isfile(row["img_path"])
-            else row["img_path"]
+            raw_path
+            if os.path.isfile(raw_path)
+            else os.path.join(args.images, raw_path)
         )
         t_img, pil_img = load_image(img_path, transform)
-        images.append(t_img)
+        images_t.append(t_img)
         origs.append((img_path, pil_img))
         texts.append(str(row.get(args.text_column, "")))
-
-    batch_imgs = torch.stack(images)
+    if not images_t:
+        return [], [], None
+    batch_imgs = torch.stack(images_t)
     tokenized = tokenizer(
         texts, padding=True, truncation=True, max_length=64, return_tensors="pt"
     )
     tokenized["raw_text"] = texts
-
     model, device = load_model(args, num_classes=len(label_map))
     batch_imgs = batch_imgs.to(device)
     tokenized = {
         k: (v.to(device) if torch.is_tensor(v) else v) for k, v in tokenized.items()
     }
     probs = predict(model, device, batch_imgs, tokenized, args.model_type)
-
+    results_meta, out_images = [], []
     for i, (_idx, row) in enumerate(samples.iterrows()):
         p = probs[i]
         topv, topi = p.topk(min(args.top_k, p.size(0)))
@@ -307,15 +351,13 @@ def main():
         gt_col = "label" if "label" in row else "category_name"
         gt = row[gt_col]
         pred_name = label_map_inv.get(pred_idx, str(pred_idx))
-        # Tính xác suất lớp dương & quyết định nhị phân
         pos_prob = (
             float(p[positive_index]) if positive_index < p.size(0) else float(p.max())
         )
         if args.decision_mode == "top1":
-            # Quyết định = top1 luôn, p_pos vẫn báo cáo theo positive_index
             decision = (
                 pred_name
-                if len(label_map_inv) > 2 or pred_idx == positive_index
+                if (len(label_map_inv) > 2 or pred_idx == positive_index)
                 else (
                     label_map_inv[positive_index]
                     if pred_idx == positive_index
@@ -328,77 +370,229 @@ def main():
                 if pos_prob >= args.threshold
                 else negative_label
             )
-        topk_str = ", ".join(
-            [
-                f"{label_map_inv.get(idx, str(idx))}({val:.2f})"
+        rec = {
+            "index": i,
+            "image": origs[i][0],
+            "gt": str(gt),
+            "pred_top1": pred_name,
+            "decision": decision,
+            "pos_prob": pos_prob,
+            "topk": [
+                {"label": label_map_inv.get(idx, str(idx)), "prob": float(val)}
                 for val, idx in topk_pairs
-            ]
-        )
-
-        if args.only_decision:
-            # In một dòng: index, decision, p_pos, topk (label:prob,...)
-            topk_inline = ";".join(
-                [f"{label_map_inv.get(idx, idx)}:{val:.3f}" for val, idx in topk_pairs]
-            )
-            print(f"{i}\t{decision}\t{pos_prob:.4f}\t{topk_inline}")
-        else:
-            img_path_display = origs[i][0]
-            print(f"--- Sample {i} ---")
-            print(f"Image: {img_path_display}")
-            print(f"GT | Pred(top1): {gt} | {pred_name}")
-            print(
-                f"Decision(threshold={args.threshold:.2f} on '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})"
-            )
-            print(f"TopK: {topk_str}")
-            # In toàn bộ xác suất các lớp (nếu số lớp nhỏ hợp lý)
-            if p.numel() <= 20:
-                all_probs_line = ", ".join(
+            ],
+            "text": texts[i],
+        }
+        results_meta.append(rec)
+        if not args.no_console:
+            if args.only_decision:
+                topk_inline = ";".join(
                     [
-                        f"{label_map_inv.get(ci, str(ci))}:{p[ci].item():.3f}"
-                        for ci in range(p.numel())
+                        f"{label_map_inv.get(idx, idx)}:{val:.3f}"
+                        for val, idx in topk_pairs
                     ]
                 )
-                print(f"All probs: {all_probs_line}")
-            txt = texts[i]
-            trunc_txt = txt[:300] + ("..." if len(txt) > 300 else "")
-            print(f"Text: {trunc_txt}")
-
-            # Lưu / hiển thị ảnh màu gốc nếu người dùng yêu cầu
-            if args.show or args.save_dir:
-                pil_img = origs[i][1].copy()
-                if not args.no_overlay:
-                    overlay_lines = [
-                        f"GT: {gt}",
-                        f"Pred: {pred_name}",
-                        f"Decision: {decision}",
-                        f"p_pos: {pos_prob:.3f}",
+                print(f"{i}\t{decision}\t{pos_prob:.4f}\t{topk_inline}")
+            else:
+                topk_str = ", ".join(
+                    [
+                        f"{label_map_inv.get(idx, str(idx))}({val:.2f})"
+                        for val, idx in topk_pairs
                     ]
-                    # Thêm top1 / topk line
-                    overlay_lines.append(
-                        "TopK: "
-                        + ", ".join(
-                            [
-                                f"{label_map_inv.get(idx, idx)}:{val:.2f}"
-                                for val, idx in topk_pairs
-                            ]
-                        )
-                    )
-                    pil_img = draw_overlay(pil_img, overlay_lines)
-                if args.save_dir:
-                    os.makedirs(args.save_dir, exist_ok=True)
-                    out_name = os.path.basename(img_path_display)
-                    out_path = os.path.join(args.save_dir, f"{i:02d}_" + out_name)
-                    try:
-                        pil_img.save(out_path)
-                    except Exception as e:
-                        print(f"[Warn] Không lưu được {out_path}: {e}")
-                if args.show:
-                    try:
-                        pil_img.show(title=f"sample_{i}")
-                    except Exception:
-                        pass
+                )
+                print(
+                    f"--- Sample {i} ---\nImage: {origs[i][0]}\nGT | Pred(top1): {gt} | {pred_name}\nDecision(threshold={args.threshold:.2f} on '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})\nTopK: {topk_str}"
+                )
+        if (
+            args.save_dir or args.export_grid or args.html_report or args.show
+        ) and not args.no_overlay:
+            pil_img = origs[i][1].copy()
+            pil_img = draw_overlay(
+                pil_img,
+                [
+                    f"GT: {gt}",
+                    f"Pred: {pred_name}",
+                    f"Decision: {decision}",
+                    f"p_pos: {pos_prob:.3f}",
+                    "TopK: "
+                    + ", ".join(
+                        [
+                            f"{label_map_inv.get(idx, idx)}:{val:.2f}"
+                            for val, idx in topk_pairs
+                        ]
+                    ),
+                ],
+            )
+        else:
+            pil_img = origs[i][1]
+        if args.save_dir:
+            os.makedirs(args.save_dir, exist_ok=True)
+            out_path = os.path.join(
+                args.save_dir, f"{i:02d}_" + os.path.basename(origs[i][0])
+            )
+            try:
+                pil_img.save(out_path)
+                rec["saved_path"] = out_path
+            except Exception as e:
+                if not args.no_console:
+                    print(f"[Warn] Không lưu được {out_path}: {e}")
+        out_images.append(pil_img)
+    grid_img = None
+    if args.export_grid and out_images:
+        import math
 
-    # Không lưu file – chỉ hiển thị theo yêu cầu
+        cols = getattr(args, "grid_cols", 4)
+        w, h = out_images[0].size
+        rows = math.ceil(len(out_images) / cols)
+        grid_img = Image.new("RGB", (cols * w, rows * h), (0, 0, 0))
+        for idx, im in enumerate(out_images):
+            r, c = divmod(idx, cols)
+            grid_img.paste(im, (c * w, r * h))
+        if args.save_dir:
+            try:
+                grid_path = os.path.join(args.save_dir, "_grid.jpg")
+                grid_img.save(grid_path)
+            except Exception as e:
+                if not args.no_console:
+                    print(f"[Warn] Không lưu grid: {e}")
+    # optional reports
+    if args.json_report:
+        try:
+            with open(args.json_report, "w", encoding="utf-8") as f:
+                json.dump(results_meta, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            if not args.no_console:
+                print(f"[Warn] Không ghi JSON: {e}")
+    if args.html_report:
+        try:
+            rows_html = []
+            for rec, img in zip(results_meta, out_images):
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                topk_html = ", ".join(
+                    [f"{tk['label']}:{tk['prob']:.2f}" for tk in rec["topk"]]
+                )
+                safe_text = rec["text"][:120].replace("<", "&lt;")
+                rows_html.append(
+                    "<tr>"
+                    f"<td>{rec['index']}</td>"
+                    f"<td><img width='140' src='data:image/png;base64,{b64}'/></td>"
+                    f"<td>{rec['gt']}</td>"
+                    f"<td>{rec['pred_top1']}</td>"
+                    f"<td>{rec['decision']}</td>"
+                    f"<td>{rec['pos_prob']:.3f}</td>"
+                    f"<td>{topk_html}</td>"
+                    f"<td>{safe_text}</td>"
+                    "</tr>"
+                )
+            html = (
+                "<html><head><meta charset='utf-8'><title>Viz</title>"
+                "<style>table{border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px}"
+                "td,th{border:1px solid #999;padding:4px 6px;vertical-align:top}</style></head><body>"
+                "<h2>Visualization Report</h2><table><thead><tr>"
+                "<th>#</th><th>Image</th><th>GT</th><th>Pred</th><th>Decision</th><th>p_pos</th><th>TopK</th><th>Text</th>"
+                "</tr></thead><tbody>"
+                + "".join(rows_html)
+                + "</tbody></table></body></html>"
+            )
+            with open(args.html_report, "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception as e:
+            if not args.no_console:
+                print(f"[Warn] Không tạo HTML: {e}")
+    # inline HTML (original images + text, no overlay) for notebook
+    if args.inline_html and out_images:
+        if _in_notebook():
+            try:
+                from IPython.display import HTML, display  # type: ignore
+
+                html_cards = []
+                for rec, (orig_path, _orig_pil), p in zip(results_meta, origs, probs):
+                    # original image (not overlay)
+                    try:
+                        with Image.open(orig_path).convert("RGB") as _tmp_im:
+                            buf = io.BytesIO()
+                            _tmp_im.save(buf, format="JPEG")
+                            b64o = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    except Exception:
+                        b64o = ""
+                    topk_html = "<br>".join(
+                        [f"{t['label']}:{t['prob']:.2f}" for t in rec["topk"]]
+                    )
+                    html_cards.append(
+                        "<div style='margin:6px;border:1px solid #ccc;padding:6px;width:180px;font-size:12px;font-family:Arial;'>"
+                        f"<div style='font-weight:bold'>{rec['decision']} ({rec['pos_prob']:.2f})</div>"
+                        + (
+                            f"<img src='data:image/jpeg;base64,{b64o}' style='width:160px;display:block;margin:4px auto;'/>"
+                            if b64o
+                            else "<div style='width:160px;height:120px;background:#eee'></div>"
+                        )
+                        + f"<div style='color:#555'>GT: {rec['gt']}</div>"
+                        + f"<div>TopK:<br>{topk_html}</div>"
+                        + "</div>"
+                    )
+                html_block = (
+                    "<div style='display:flex;flex-wrap:wrap'>"
+                    + "".join(html_cards)
+                    + "</div>"
+                )
+                display(HTML(html_block))
+            except Exception:
+                if not args.no_console:
+                    print("[Warn] Inline HTML thất bại")
+
+    # show images if requested (after grid maybe)
+    if args.show:
+        if _in_notebook():
+            for i, im in enumerate(out_images):
+                _notebook_display(im)
+            if grid_img:
+                _notebook_display(grid_img)
+        else:
+            try:
+                for im in out_images:
+                    im.show()
+                if grid_img:
+                    grid_img.show()
+            except Exception:
+                if not args.no_console:
+                    print("[Info] Headless environment: skip .show()")
+    # Optional matplotlib grid
+    if args.mpl_grid and out_images:
+        try:
+            import math
+            import matplotlib.pyplot as plt  # type: ignore
+
+            cols = getattr(args, "grid_cols", 4)
+            rows = math.ceil(len(out_images) / cols)
+            fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
+            if not isinstance(axes, (list, tuple)):
+                axes = axes.reshape(-1)
+            axes_flat = axes.ravel()
+            for idx, (ax, im, rec) in enumerate(
+                zip(axes_flat, out_images, results_meta)
+            ):
+                ax.imshow(im)
+                ax.set_title(f"{rec['decision']} ({rec['pos_prob']:.2f})", fontsize=8)
+                ax.axis("off")
+            for j in range(len(out_images), len(axes_flat)):
+                axes_flat[j].axis("off")
+            plt.tight_layout()
+            try:
+                plt.show()
+            except Exception:
+                if not args.no_console:
+                    print("[Info] Headless environment: skip matplotlib show")
+        except Exception as e:
+            if not args.no_console:
+                print(f"[Warn] matplotlib grid thất bại: {e}")
+    return results_meta, out_images, grid_img
+
+
+def main():
+    args = parse_args()
+    run_visualization(args)
 
 
 if __name__ == "__main__":

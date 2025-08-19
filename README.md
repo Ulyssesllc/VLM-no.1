@@ -80,67 +80,127 @@ python single.py --model-train Single_Image --epochs 10
 ```
 
 ## Trực Quan Hoá / Suy Luận (`visualize_adidas.py`)
-Script hiện tại tập trung hiển thị trực tiếp xác suất & quyết định và (tuỳ chọn) lưu / mở ảnh **màu gốc** kèm overlay, KHÔNG còn dùng ASCII mặc định.
+Script hiển thị xác suất & quyết định, có thể tạo overlay, grid, báo cáo JSON / HTML, hiển thị inline notebook (ảnh gốc hoặc overlay), hoặc kết xuất matplotlib. Không còn dùng ASCII mặc định.
 
-### Thay đổi chính (so với phiên bản cũ)
-- Mặc định `--threshold` = **0.45**.
-- Mặc định `--positive-label` = **fake** (nếu xác suất lớp "fake" ≥ 0.45 → quyết định fake, ngược lại real khi chỉ có 2 lớp).
-- Bỏ các tham số ASCII (`--ascii-preview`, `--color-ascii`, ...). Có thể tái bổ sung sau nếu cần.
-- Thêm hỗ trợ hiển thị / lưu ảnh thật: `--show`, `--save-dir`, `--no-overlay`.
+### Điểm nổi bật
+* Ngưỡng mặc định `--threshold = 0.40`.
+* `--positive-label = fake` (p(fake) ≥ threshold => fake nếu bài toán 2 lớp).
+* Overlay: GT, Pred(top1), Decision, p_pos, TopK.
+* Chế độ quyết định: `threshold` hoặc `top1`.
+* Xuất đa định dạng: ảnh rời, ảnh grid, JSON metadata, HTML nhúng base64, grid matplotlib, HTML inline notebook ảnh gốc.
+* API lập trình: `run_visualization(args)` trả về `(meta_list, list_PIL_images, grid_image_or_None)`.
 
-### Ví dụ cơ bản (in thông tin ra console)
+### Ví dụ nhanh
 ```bash
+# In thông tin lên console (8 mẫu mặc định)
 python visualize_adidas.py --checkpoint checkpoints/best_model.pth
-```
 
-### Lưu ảnh có overlay dự đoán
-```bash
+# Lưu ảnh overlay + grid + JSON + HTML (không mở cửa sổ)
 python visualize_adidas.py \
    --checkpoint checkpoints/best_model.pth \
    --model-type Q_cons_fusion \
    --num-samples 12 --top-k 5 \
-   --save-dir viz_outputs
+   --save-dir viz_out --export-grid \
+   --json-report viz_out/results.json \
+   --html-report viz_out/report.html
+
+# Chỉ quyết định nhị phân (1 dòng / ảnh)
+python visualize_adidas.py --checkpoint checkpoints/best_model.pth --only-decision --num-samples 20
+
+# Ảnh gốc không overlay
+python visualize_adidas.py --checkpoint checkpoints/best_model.pth --save-dir raw_out --no-overlay
+
+# Hiển thị grid matplotlib (ví dụ notebook hoặc có display)
+python visualize_adidas.py --checkpoint checkpoints/best_model.pth --mpl-grid --grid-cols 6 --num-samples 18
+
+# Inline HTML (ảnh gốc + thông số) trong notebook, không in console
+python visualize_adidas.py --checkpoint checkpoints/best_model.pth --inline-html --no-console
 ```
 
-### Mở cửa sổ xem nhanh (nếu môi trường hỗ trợ GUI / desktop)
-```bash
-python visualize_adidas.py --checkpoint checkpoints/best_model.pth --show --num-samples 4
+### Dùng trong Notebook (API)
+```python
+from visualize_adidas import parse_args, run_visualization
+args = parse_args()              # hoặc tự tạo namespace
+args.num_samples = 10
+args.no_console = True           # tránh spam
+meta, imgs, grid = run_visualization(args)
+
+# Hiển thị ảnh đầu tiên
+display(imgs[0])
+
+# Truy cập metadata một mẫu
+print(meta[0])
 ```
 
-### Chỉ copy ảnh gốc (không vẽ overlay)
-```bash
-python visualize_adidas.py --checkpoint checkpoints/best_model.pth --save-dir raw_exports --no-overlay
+Trường trong `meta[i]`:
+```
+{
+   'index': int,
+   'image': 'đường_dẫn_ảnh',
+   'gt': 'nhãn_thật',
+   'pred_top1': 'nhãn_top1',
+   'decision': 'kết_quả_cuối',
+   'pos_prob': float,            # p(positive_label)
+   'topk': [ {'label': str, 'prob': float}, ... ],
+   'text': 'nội_dung_văn_bản',
+   'saved_path': '...'(tuỳ có nếu --save-dir)
+}
 ```
 
-### Chỉ in quyết định nhị phân (một dòng / ảnh)
+### Tham số chính
+| Tham số | Mặc định | Mô tả |
+|---------|----------|-------|
+| `--checkpoint` | (bắt buộc) | File `.pth` có `model_state`. |
+| `--model-type` | Q_cons_fusion | `Q_cons_fusion` hoặc `MLP_fusion`. |
+| `--train-csv` / `--test-csv` | adidas_dataset/labels.csv | CSV dữ liệu (phân tách `;`). |
+| `--images` | adidas_dataset | Thư mục gốc ảnh. |
+| `--num-samples` | 8 | Số mẫu lấy từ test CSV. |
+| `--sample-strategy` | random | `random` hoặc `first`. |
+| `--top-k` | 5 | Số lớp top-k hiển thị. |
+| `--threshold` | 0.40 | Ngưỡng lớp dương (decision-mode=threshold). |
+| `--positive-label` | fake | Tên lớp dương (case-insensitive). |
+| `--decision-mode` | threshold | `threshold` / `top1`. |
+| `--only-decision` | off | In gọn: 1 dòng / mẫu. |
+| `--no-console` | off | Không in ra stdout. |
+| `--show` | off | Mở ảnh (GUI) hoặc inline notebook (từng ảnh). |
+| `--save-dir` | None | Lưu ảnh (overlay hoặc gốc nếu `--no-overlay`). |
+| `--no-overlay` | off | Không vẽ khung text lên ảnh. |
+| `--export-grid` | off | Tạo ảnh ghép `_grid.jpg` (khi có ảnh). |
+| `--grid-cols` | 4 | Cột cho grid & matplotlib. |
+| `--mpl-grid` | off | Grid matplotlib (inline hoặc cửa sổ). |
+| `--json-report` | None | Ghi JSON metadata. |
+| `--html-report` | None | Ghi HTML embedded base64. |
+| `--inline-html` | off | Hiển thị HTML grid ảnh gốc + thông số (notebook). |
+| `--text-column` | category_name | Cột văn bản đầu vào tokenizer. |
+
+### Ghi chú quyết định
+* 2 lớp: nếu `decision-mode=threshold` → so sánh p(positive) với ngưỡng.
+* `decision-mode=top1`: chọn lớp có xác suất cao nhất (không dùng ngưỡng) nhưng vẫn báo cáo p_pos.
+
+### Khi nào dùng từng tuỳ chọn
+| Mục tiêu | Bật các cờ |
+|----------|------------|
+| Chỉ xem nhanh console | (mặc định) |
+| Tạo bộ ảnh review | `--save-dir viz_out` |
+| Một ảnh tổng hợp | `--export-grid --save-dir viz_out` |
+| Phân tích / post-processing | `--json-report out.json` |
+| Báo cáo chia sẻ nhanh | `--html-report report.html` |
+| Notebook gallery (ảnh gốc) | `--inline-html --no-console` |
+| Grid khoa học (matplotlib) | `--mpl-grid --grid-cols 6` |
+| So sánh nhị phân gọn | `--only-decision` |
+
+### Ví dụ kết hợp tối đa
 ```bash
 python visualize_adidas.py \
    --checkpoint checkpoints/best_model.pth \
-   --only-decision --num-samples 20
-```
-Đầu ra dạng TSV:
-```
-index<TAB>decision<TAB>p_pos<TAB>label1:prob;label2:prob;...
+   --num-samples 24 --top-k 5 \
+   --save-dir viz_all --export-grid \
+   --json-report viz_all/results.json \
+   --html-report viz_all/report.html \
+   --mpl-grid --inline-html --no-console
 ```
 
-### Các tham số quan trọng
-| Tham số | Mặc định | Mô tả |
-|---------|----------|-------|
-| `--checkpoint` | bắt buộc | Đường dẫn file `.pth` (chứa `model_state`). |
-| `--model-type` | Q_cons_fusion | Kiểu mô hình: `Q_cons_fusion` hoặc `MLP_fusion`. |
-| `--num-samples` | 8 | Số mẫu hiển thị / xử lý từ CSV test. |
-| `--top-k` | 5 | Số lớp top-k in ra. |
-| `--threshold` | 0.45 | Ngưỡng xác suất cho lớp dương (decision-mode=threshold). |
-| `--positive-label` | fake | Tên lớp dương. Không phân biệt hoa thường. |
-| `--decision-mode` | threshold | `threshold` hoặc `top1`. |
-| `--only-decision` | off | Bật: chỉ một dòng / mẫu. |
-| `--show` | off | Mở ảnh (GUI). |
-| `--save-dir` | None | Lưu ảnh overlay vào thư mục. Tạo nếu chưa có. |
-| `--no-overlay` | off | Khi lưu / show chỉ dùng ảnh gốc, không vẽ text. |
-
-Overlay gồm: GT, Pred(top1), Decision, p_pos, TopK.
-
-> Ghi chú: Nếu nhiều hơn 2 lớp, logic decision threshold sẽ so sánh p_pos với ngưỡng; phần còn lại được liệt kê trong TopK.
+> Nếu chỉ muốn ảnh gốc + thông số trong notebook (không sửa file trên đĩa): dùng `--inline-html --no-overlay --no-console` và bỏ `--save-dir`.
 
 ## Cấu Hình (`config.py`)
 Mọi siêu tham số nằm trong `config.py` (dataclass `GlamiConfig`). Sửa giá trị rồi chạy lại `train.py`.
@@ -180,7 +240,7 @@ Checkpoint tốt nhất lưu tại `CONFIG.checkpoint_dir/best_model.pth` gồm:
 Lịch sử epoch đầy đủ: `history.json` (đa modal) hoặc `attention_history.json` (train1).
 
 ## Gợi Ý Tối Ưu Ngưỡng
-Nếu bật `--threshold_sweep`, mỗi epoch sẽ đề xuất `Thr*` và `F1*` (F1 lớp dương). Dùng giá trị đó để điều chỉnh `--threshold` (mặc định 0.45) khi suy luận.
+Nếu bật `--threshold_sweep`, mỗi epoch sẽ đề xuất `Thr*` và `F1*` (F1 lớp dương). Dùng giá trị đó để điều chỉnh `--threshold` (mặc định 0.40) khi suy luận.
 
 ## Phát Hiện Lệch Lớp
 Huấn luyện in cảnh báo nếu >90% dự đoán rơi vào lớp dương. Khi gặp:
