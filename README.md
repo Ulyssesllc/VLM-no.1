@@ -113,14 +113,7 @@ Checkpoint tốt nhất lưu tại `CONFIG.checkpoint_dir/best_model.pth` gồm:
 - (nếu dùng AMP) `scaler_state`
 - `best_acc`
 
-## Xử Lý Sự Cố (Troubleshooting)
-| Vấn đề | Cách khắc phục |
-|--------|----------------|
-| OOM (CUDA) | Giảm `CONFIG.batch_size`, tắt mixed precision, hoặc chọn mô hình nhỏ hơn |
-| Tokenizer tải thất bại | Bảo đảm có internet lần đầu hoặc cache model HuggingFace |
-| Sai số lớp | Chạy lại `train.py` sau khi chỉnh CSV để tái tạo label_map |
-| Môi trường chỉ CPU | Cài bản torch/torchvision CPU phù hợp trước rồi mới `pip install -r requirements.txt` |
-| Lỗi in tên GPU khi không có CUDA | Đã bỏ gọi thẳng `torch.cuda.get_device_name(0)` trong mã mới – pull phiên bản mới nhất |
+
 
 ## Giấy Phép
 Phát hành theo MIT License. Xem chi tiết trong file `LICENSE`.
