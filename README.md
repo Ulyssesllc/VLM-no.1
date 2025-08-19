@@ -80,49 +80,67 @@ python single.py --model-train Single_Image --epochs 10
 ```
 
 ## Trực Quan Hoá / Suy Luận (`visualize_adidas.py`)
-Hiển thị dự đoán trên mẫu test bằng ASCII (đen trắng hoặc true‑color). Không tạo file.
+Script hiện tại tập trung hiển thị trực tiếp xác suất & quyết định và (tuỳ chọn) lưu / mở ảnh **màu gốc** kèm overlay, KHÔNG còn dùng ASCII mặc định.
 
-Ví dụ cơ bản:
+### Thay đổi chính (so với phiên bản cũ)
+- Mặc định `--threshold` = **0.45**.
+- Mặc định `--positive-label` = **fake** (nếu xác suất lớp "fake" ≥ 0.45 → quyết định fake, ngược lại real khi chỉ có 2 lớp).
+- Bỏ các tham số ASCII (`--ascii-preview`, `--color-ascii`, ...). Có thể tái bổ sung sau nếu cần.
+- Thêm hỗ trợ hiển thị / lưu ảnh thật: `--show`, `--save-dir`, `--no-overlay`.
+
+### Ví dụ cơ bản (in thông tin ra console)
 ```bash
 python visualize_adidas.py --checkpoint checkpoints/best_model.pth
 ```
 
-Ví dụ đầy đủ với quyết định nhị phân và ngưỡng:
+### Lưu ảnh có overlay dự đoán
 ```bash
 python visualize_adidas.py \
    --checkpoint checkpoints/best_model.pth \
    --model-type Q_cons_fusion \
-   --train-csv adidas_dataset/labels.csv \
-   --test-csv adidas_dataset/labels.csv \
-   --images adidas_dataset \
-   --num-samples 8 --top-k 5 \
-   --ascii-preview --ascii-width 48 --ascii-source original \
-   --threshold 0.55 --positive-label fake --decision-mode threshold
+   --num-samples 12 --top-k 5 \
+   --save-dir viz_outputs
 ```
 
-Chỉ in một dòng/ảnh (phục vụ quét nhanh):
+### Mở cửa sổ xem nhanh (nếu môi trường hỗ trợ GUI / desktop)
 ```bash
-python visualize_adidas.py --checkpoint checkpoints/best_model.pth \
-   --only-decision --num-samples 20 --threshold 0.6 --positive-label fake
+python visualize_adidas.py --checkpoint checkpoints/best_model.pth --show --num-samples 4
 ```
 
-### Các Tham Số Mới / Quan Trọng
-| Tham số | Mặc định | Giải thích |
-|---------|----------|------------|
-| `--threshold 0.5` | 0.5 | Ngưỡng xác suất lớp dương (mode=threshold). |
-| `--positive_label real` | real | Tên lớp coi là dương. Không phân biệt hoa thường. |
-| `--decision-mode threshold|top1` | threshold | threshold: so sánh p_pos với ngưỡng; top1: luôn chọn lớp xác suất cao nhất. |
-| `--only-decision` | off | Ghi 1 dòng: index, quyết định, p_pos, topK (label:prob;...). |
-| `--ascii-source original|transformed` | original | Chọn ảnh gốc hay ảnh đã resize/augment cho ASCII. |
-| `--ascii-preview` | off | Hiển thị ASCII (đen trắng hoặc màu). |
-| `--color-ascii` | off | Bật true‑color block (môi trường cần hỗ trợ 24‑bit). |
-
-Định dạng `--only-decision`:
-```
-idx<TAB>decision<TAB>p_pos<TAB>label1:prob;label2:prob;...
+### Chỉ copy ảnh gốc (không vẽ overlay)
+```bash
+python visualize_adidas.py --checkpoint checkpoints/best_model.pth --save-dir raw_exports --no-overlay
 ```
 
-Mẹo: Nếu terminal bị “kẹt” màu sau preview màu, chạy `reset`.
+### Chỉ in quyết định nhị phân (một dòng / ảnh)
+```bash
+python visualize_adidas.py \
+   --checkpoint checkpoints/best_model.pth \
+   --only-decision --num-samples 20
+```
+Đầu ra dạng TSV:
+```
+index<TAB>decision<TAB>p_pos<TAB>label1:prob;label2:prob;...
+```
+
+### Các tham số quan trọng
+| Tham số | Mặc định | Mô tả |
+|---------|----------|-------|
+| `--checkpoint` | bắt buộc | Đường dẫn file `.pth` (chứa `model_state`). |
+| `--model-type` | Q_cons_fusion | Kiểu mô hình: `Q_cons_fusion` hoặc `MLP_fusion`. |
+| `--num-samples` | 8 | Số mẫu hiển thị / xử lý từ CSV test. |
+| `--top-k` | 5 | Số lớp top-k in ra. |
+| `--threshold` | 0.45 | Ngưỡng xác suất cho lớp dương (decision-mode=threshold). |
+| `--positive-label` | fake | Tên lớp dương. Không phân biệt hoa thường. |
+| `--decision-mode` | threshold | `threshold` hoặc `top1`. |
+| `--only-decision` | off | Bật: chỉ một dòng / mẫu. |
+| `--show` | off | Mở ảnh (GUI). |
+| `--save-dir` | None | Lưu ảnh overlay vào thư mục. Tạo nếu chưa có. |
+| `--no-overlay` | off | Khi lưu / show chỉ dùng ảnh gốc, không vẽ text. |
+
+Overlay gồm: GT, Pred(top1), Decision, p_pos, TopK.
+
+> Ghi chú: Nếu nhiều hơn 2 lớp, logic decision threshold sẽ so sánh p_pos với ngưỡng; phần còn lại được liệt kê trong TopK.
 
 ## Cấu Hình (`config.py`)
 Mọi siêu tham số nằm trong `config.py` (dataclass `GlamiConfig`). Sửa giá trị rồi chạy lại `train.py`.
@@ -162,7 +180,7 @@ Checkpoint tốt nhất lưu tại `CONFIG.checkpoint_dir/best_model.pth` gồm:
 Lịch sử epoch đầy đủ: `history.json` (đa modal) hoặc `attention_history.json` (train1).
 
 ## Gợi Ý Tối Ưu Ngưỡng
-Nếu bật `--threshold_sweep`, mỗi epoch sẽ đề xuất `Thr*` và `F1*` (F1 lớp dương). Dùng giá trị đó để đặt `--threshold` trong suy luận/triển khai.
+Nếu bật `--threshold_sweep`, mỗi epoch sẽ đề xuất `Thr*` và `F1*` (F1 lớp dương). Dùng giá trị đó để điều chỉnh `--threshold` (mặc định 0.45) khi suy luận.
 
 ## Phát Hiện Lệch Lớp
 Huấn luyện in cảnh báo nếu >90% dự đoán rơi vào lớp dương. Khi gặp:

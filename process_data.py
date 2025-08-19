@@ -209,6 +209,9 @@ class MyData(Dataset):
             sample["orig_image_tensor"] = orig_tensor  # Tensor [3,H,W]
         return sample
 
+    def __len__(self) -> int:  # Needed by DataLoader / Samplers
+        return len(self.df)
+
 
 def build_label_map(csv_path: str, label_column: str = "label") -> Dict[str, int]:
     df = pd.read_csv(csv_path, sep=";")
