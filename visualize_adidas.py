@@ -1,10 +1,5 @@
 """Console visualization for adidas_dataset models (Q_cons_fusion / MLP_fusion).
 
-Changes (parity with amazon/visualize_results.py console-only mode):
- - Removed matplotlib grid + JSON export (no files are written by default).
- - Added optional ASCII preview (grayscale) or ANSI truecolor block preview ("--color-ascii").
- - Prints per-sample block: optional ASCII image, Sample header, GT | Pred, TopK, Text (token source).
- - Deterministic sampling via --seed, strategy random/first.
 
 Example:
     python visualize_adidas.py \
@@ -15,10 +10,7 @@ Example:
         --images adidas_dataset \
         --num-samples 6 --top-k 5 --ascii-preview --color-ascii
 
-Notes:
- - Q_cons_fusion path is primary; MLP_fusion loaded best-effort.
- - Text column (default category_name) is tokenized for models needing text; also echoed in console.
- - To restore JSON/grid saving, extend this script (see git history for previous version).
+
 """
 
 from __future__ import annotations
@@ -83,6 +75,36 @@ def parse_args():
         default=40,
         help="Width (characters) for ASCII preview",
     )
+    # Không xuất file riêng theo yêu cầu – chỉ hiển thị console
+    p.add_argument(
+        "--ascii-source",
+        choices=["original", "transformed"],
+        default="original",
+        help="Dùng ảnh gốc hay ảnh đã transform cho ASCII preview",
+    )
+    p.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="Ngưỡng xác suất để phân loại real/fake (>= threshold => positive-label)",
+    )
+    p.add_argument(
+        "--positive-label",
+        type=str,
+        default="real",
+        help="Tên lớp dương (ví dụ 'real'). Không phân biệt hoa thường.",
+    )
+    p.add_argument(
+        "--only-decision",
+        action="store_true",
+        help="Chỉ in ra một dòng quyết định (real/fake) cho mỗi sample",
+    )
+    p.add_argument(
+        "--decision-mode",
+        choices=["threshold", "top1"],
+        default="threshold",
+        help="threshold: dùng ngưỡng p_pos; top1: luôn chọn lớp xác suất cao nhất làm decision",
+    )
     return p.parse_args()
 
 
@@ -111,7 +133,7 @@ def load_image(path: str, transform):
         img = Image.open(path).convert("RGB")
     except Exception:
         img = Image.new("RGB", (224, 224), (0, 0, 0))
-    return transform(img)
+    return transform(img), img
 
 
 def build_transform():
@@ -232,12 +254,35 @@ def main():
 
     label_map = build_label_map(args.train_csv)
     label_map_inv = {v: k for k, v in label_map.items()}
+    # Xác định lớp dương (positive)
+    pos_label_norm = args.positive_label.strip().lower()
+    positive_index = None
+    for idx, name in label_map_inv.items():
+        if str(name).lower() == pos_label_norm:
+            positive_index = idx
+            break
+    if positive_index is None:
+        # fallback: nếu không tìm thấy, chọn index 0
+        positive_index = 0
+        print(
+            f"[Warn] Không tìm thấy lớp '{args.positive_label}', dùng lớp index 0: {label_map_inv[0]}"
+        )
+    # Xác định tên lớp còn lại (negative)
+    if len(label_map_inv) == 2:
+        negative_index = 1 - positive_index
+        negative_label = label_map_inv[negative_index]
+    else:
+        # nếu nhiều hơn 2 lớp, negative_label chỉ để hiển thị
+        negative_label = ",".join(
+            [label_map_inv[i] for i in label_map_inv if i != positive_index]
+        )
     samples = load_samples(args.test_csv, args.num_samples, args.sample_strategy)
 
     transform = build_transform()
     tokenizer = BertTokenizer.from_pretrained("bert-base-multilingual-cased")
 
     images = []
+    origs = []  # (original_path, PIL.Image)
     texts: List[str] = []
     for _, row in samples.iterrows():
         img_path = (
@@ -245,7 +290,9 @@ def main():
             if not os.path.isfile(row["img_path"])
             else row["img_path"]
         )
-        images.append(load_image(img_path, transform))
+        t_img, pil_img = load_image(img_path, transform)
+        images.append(t_img)
+        origs.append((img_path, pil_img))
         texts.append(str(row.get(args.text_column, "")))
 
     batch_imgs = torch.stack(images)
@@ -270,28 +317,73 @@ def main():
         gt_col = "label" if "label" in row else "category_name"
         gt = row[gt_col]
         pred_name = label_map_inv.get(pred_idx, str(pred_idx))
+        # Tính xác suất lớp dương & quyết định nhị phân
+        pos_prob = (
+            float(p[positive_index]) if positive_index < p.size(0) else float(p.max())
+        )
+        if args.decision_mode == "top1":
+            # Quyết định = top1 luôn, p_pos vẫn báo cáo theo positive_index
+            decision = (
+                pred_name
+                if len(label_map_inv) > 2 or pred_idx == positive_index
+                else (
+                    label_map_inv[positive_index]
+                    if pred_idx == positive_index
+                    else negative_label
+                )
+            )
+        else:
+            decision = (
+                label_map_inv[positive_index]
+                if pos_prob >= args.threshold
+                else negative_label
+            )
         topk_str = ", ".join(
             [
                 f"{label_map_inv.get(idx, str(idx))}({val:.2f})"
                 for val, idx in topk_pairs
             ]
         )
-        if args.ascii_preview:
+
+        if args.ascii_preview and not args.only_decision:
+            # Chọn nguồn ảnh cho ASCII
+            if args.ascii_source == "original":
+                pil_img = origs[i][1]
+                orig_tensor = transforms.ToTensor()(pil_img)
+                mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
+                std = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
+                ascii_tensor = (orig_tensor - mean) / std
+            else:
+                ascii_tensor = batch_imgs[i].cpu()
             if args.color_ascii:
                 if not warned_color:
                     print(
                         "[Info] Using ANSI truecolor blocks; ensure terminal supports 24-bit color."
                     )
                     warned_color = True
-                print(tensor_to_color_ascii(batch_imgs[i].cpu(), args.ascii_width))
+                print(tensor_to_color_ascii(ascii_tensor, args.ascii_width))
             else:
-                print(tensor_to_ascii(batch_imgs[i].cpu(), args.ascii_width))
+                print(tensor_to_ascii(ascii_tensor, args.ascii_width))
+
+        if args.only_decision:
+            # In một dòng: index, decision, p_pos, topk (label:prob,...)
+            topk_inline = ";".join(
+                [f"{label_map_inv.get(idx, idx)}:{val:.3f}" for val, idx in topk_pairs]
+            )
+            print(f"{i}\t{decision}\t{pos_prob:.4f}\t{topk_inline}")
+            continue
+
         print(f"--- Sample {i} ---")
-        print(f"GT | Pred: {gt} | {pred_name}")
+        print(f"GT | Pred(top1): {gt} | {pred_name}")
+        print(
+            f"Decision(threshold={args.threshold:.2f} on '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})"
+        )
         print(f"TopK: {topk_str}")
         txt = texts[i]
         trunc_txt = txt[:300] + ("..." if len(txt) > 300 else "")
         print(f"Text: {trunc_txt}")
+
+    # Không lưu file – chỉ hiển thị theo yêu cầu
 
 
 if __name__ == "__main__":
