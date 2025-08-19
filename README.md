@@ -25,19 +25,53 @@ pip install -r requirements.txt
 ```
 
 ## Huấn Luyện (Đa Phương Thức)
+Lệnh cơ bản:
 ```bash
 python train.py --model Q_cons_fusion --epochs 15
 ```
-Các tuỳ chọn `--model`:
-- `Q_cons_fusion` (mặc định): ViT + BERT đa ngôn ngữ (loss contrastive + CrossEntropy)
-- `MLP_fusion`: ResNet18 + BERT (fusion đơn giản)
-- `Q_former_fusion`: Hợp nhất qua query cross-attention
-- `Q_bottleneck`: Kiến trúc Q-bottleneck + MoE nội bộ (wrapper)
-- `MoE`: Mô hình Cross-IT + MoE độc lập (wrapper)
+### Kiến trúc (`--model`)
+- `Q_cons_fusion` (mặc định): ViT + BERT + loss contrastive (ITC) + CE/Focal
+- `MLP_fusion`: ResNet18 + BERT (fusion tuyến tính)
+- `Q_former_fusion`: Query cross-attention style
+- `Q_bottleneck`: Q-bottleneck + MoE nội bộ (bọc lại để có triple output)
+- `MoE`: MoE độc lập (bọc để tương thích ITC loss)
 
-Tất cả tự động suy ra số lớp từ CSV.
+Tự suy ra `num_classes` từ CSV.
 
-Log và checkpoint lưu tại thư mục trong `config.py` (`CONFIG.log_dir`, `CONFIG.checkpoint_dir`).
+### Điều Khiển Kích Thước Ảnh
+| Tham số | Mô tả |
+|---------|-------|
+| `--target_size 224` | Resize đồng nhất (mặc định 224). |
+| `--target_size 0` hoặc giá trị âm | Giữ kích thước gốc (native). Áp dụng downscale sớm nếu quá lớn. |
+| `--max_raw_hw 1600` | Giới hạn cạnh dài ảnh gốc trước augment (native mode) để tiết kiệm VRAM/RAM. |
+| `--no_return_original` | Bỏ trả metadata ảnh gốc (orig_size, orig_image_tensor) để giảm RAM. |
+
+### Giảm Lệch Lớp & Nâng Cao Loss
+| Tham số | Mặc định | Chức năng |
+|---------|----------|-----------|
+| `--use_class_weights` | off | Áp dụng trọng số nghịch đảo tần suất vào CE / Focal. |
+| `--weighted_sampler` | off | Dùng `WeightedRandomSampler` cân bằng sampling per-batch. |
+| `--loss_type ce|focal` | `ce` | Chọn CrossEntropy hoặc Focal. |
+| `--gamma` | 2.0 | Tham số gamma của Focal. |
+| `--positive_label real` | `real` | Đặt tên lớp dương để tính threshold sweep & thống kê. |
+| `--threshold_sweep` | off | Quét ngưỡng (0.05→0.95) tìm F1 tốt nhất cho lớp dương mỗi epoch. |
+
+Mỗi epoch log thêm: Balanced Accuracy, confusion matrix, precision/recall/F1 từng lớp, mean prob lớp dương, (nếu bật) ngưỡng & F1 tối ưu.
+
+Ví dụ bật tối đa biện pháp giảm lệch:
+```bash
+python train.py \
+   --model Q_cons_fusion \
+   --epochs 20 \
+   --loss_type focal --gamma 2.0 \
+   --use_class_weights --weighted_sampler \
+   --threshold_sweep --positive_label fake
+```
+
+### Ghi Log & Checkpoint
+- Checkpoint tốt nhất: `CONFIG.checkpoint_dir/best_model.pth`
+- Log huấn luyện: `CONFIG.log_dir/train_log.txt` + `history.json`
+- Model attention/đơn giản (train1) ghi vào `attention_log.txt` / `attention_history.json`.
 
 ## Baseline Đơn Modal
 ```bash
@@ -45,16 +79,15 @@ python single.py --model-train Single_Text  --epochs 10
 python single.py --model-train Single_Image --epochs 10
 ```
 
-## Trực Quan Hoá
-`visualize_adidas.py` hiển thị dự đoán trên một tập mẫu bằng ASCII (đen trắng hoặc true‑color) không tạo file.
+## Trực Quan Hoá / Suy Luận (`visualize_adidas.py`)
+Hiển thị dự đoán trên mẫu test bằng ASCII (đen trắng hoặc true‑color). Không tạo file.
 
-Ví dụ cơ bản (dùng checkpoint tốt nhất):
+Ví dụ cơ bản:
 ```bash
-python visualize_adidas.py \
-   --checkpoint checkpoints/best_model.pth
+python visualize_adidas.py --checkpoint checkpoints/best_model.pth
 ```
 
-Ví dụ đầy đủ:
+Ví dụ đầy đủ với quyết định nhị phân và ngưỡng:
 ```bash
 python visualize_adidas.py \
    --checkpoint checkpoints/best_model.pth \
@@ -62,22 +95,34 @@ python visualize_adidas.py \
    --train-csv adidas_dataset/labels.csv \
    --test-csv adidas_dataset/labels.csv \
    --images adidas_dataset \
-   --num-samples 6 \
-   --top-k 5 \
-   --sample-strategy first \
-   --ascii-preview --color-ascii --ascii-width 48
+   --num-samples 8 --top-k 5 \
+   --ascii-preview --ascii-width 48 --ascii-source original \
+   --threshold 0.55 --positive-label fake --decision-mode threshold
 ```
 
-Tham số chính:
-- `--checkpoint`: (bắt buộc) đường dẫn file `.pth`.
-- `--model-type`: `Q_cons_fusion` | `MLP_fusion`.
-- `--num-samples`: số mẫu hiển thị.
-- `--sample-strategy`: `random` hoặc `first`.
-- `--ascii-preview`: bật hiển thị ASCII.
-- `--color-ascii`: dùng block màu (cần terminal 24‑bit color).
-- `--ascii-width`: độ rộng ký tự khi scale ảnh.
+Chỉ in một dòng/ảnh (phục vụ quét nhanh):
+```bash
+python visualize_adidas.py --checkpoint checkpoints/best_model.pth \
+   --only-decision --num-samples 20 --threshold 0.6 --positive-label fake
+```
 
-Mẹo: nếu màu sắc vẫn còn trong terminal sau khi in block màu, chạy `reset`.
+### Các Tham Số Mới / Quan Trọng
+| Tham số | Mặc định | Giải thích |
+|---------|----------|------------|
+| `--threshold 0.5` | 0.5 | Ngưỡng xác suất lớp dương (mode=threshold). |
+| `--positive_label real` | real | Tên lớp coi là dương. Không phân biệt hoa thường. |
+| `--decision-mode threshold|top1` | threshold | threshold: so sánh p_pos với ngưỡng; top1: luôn chọn lớp xác suất cao nhất. |
+| `--only-decision` | off | Ghi 1 dòng: index, quyết định, p_pos, topK (label:prob;...). |
+| `--ascii-source original|transformed` | original | Chọn ảnh gốc hay ảnh đã resize/augment cho ASCII. |
+| `--ascii-preview` | off | Hiển thị ASCII (đen trắng hoặc màu). |
+| `--color-ascii` | off | Bật true‑color block (môi trường cần hỗ trợ 24‑bit). |
+
+Định dạng `--only-decision`:
+```
+idx<TAB>decision<TAB>p_pos<TAB>label1:prob;label2:prob;...
+```
+
+Mẹo: Nếu terminal bị “kẹt” màu sau preview màu, chạy `reset`.
 
 ## Cấu Hình (`config.py`)
 Mọi siêu tham số nằm trong `config.py` (dataclass `GlamiConfig`). Sửa giá trị rồi chạy lại `train.py`.
@@ -110,8 +155,21 @@ Có thể mở rộng để truyền qua CLI (chưa hiện thực).
 Checkpoint tốt nhất lưu tại `CONFIG.checkpoint_dir/best_model.pth` gồm:
 - `model_state`
 - `optimizer_state`
-- (nếu dùng AMP) `scaler_state`
+- `scaler_state` (nếu AMP)
 - `best_acc`
+- `config`
+
+Lịch sử epoch đầy đủ: `history.json` (đa modal) hoặc `attention_history.json` (train1).
+
+## Gợi Ý Tối Ưu Ngưỡng
+Nếu bật `--threshold_sweep`, mỗi epoch sẽ đề xuất `Thr*` và `F1*` (F1 lớp dương). Dùng giá trị đó để đặt `--threshold` trong suy luận/triển khai.
+
+## Phát Hiện Lệch Lớp
+Huấn luyện in cảnh báo nếu >90% dự đoán rơi vào lớp dương. Khi gặp:
+1. Dùng `--weighted_sampler` hoặc `--use_class_weights`.
+2. Chuyển sang `--loss_type focal`.
+3. Kiểm tra lại cân bằng dữ liệu train (CSV). 
+4. Điều chỉnh ngưỡng `--threshold` (xem sweep) hoặc chọn lớp dương khác.
 
 
 
