@@ -9,7 +9,7 @@ Thay đổi chính so với phiên bản cũ:
 
 Ví dụ:
     python visualize_adidas.py --checkpoint checkpoints/best_model_gan.pth \
-        --disc_model Q_cons_fusion --images adidas_dataset --num-samples 8 --show
+        --disc_model Q_cons_fusion --images adidas_dataset --num-samples 8
 """
 
 from __future__ import annotations
@@ -296,7 +296,9 @@ def load_model(args, num_classes: int):
         model = _QBottleWrapper()
     else:  # MoE
         model = _MoEWrapper()
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    # PyTorch >=2.6: weights_only=True by default, but some checkpoints need full unpickling.
+    # WARNING: Setting weights_only=False can execute arbitrary code if checkpoint is untrusted.
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     sd = ckpt.get("model_state", ckpt)
     sd = strip_module(sd)
     missing, unexpected = model.load_state_dict(sd, strict=False)
@@ -522,7 +524,7 @@ def run_visualization(args):
         results_meta.append(rec)
         # overlay
         if (
-            args.save_dir or args.export_grid or args.html_report or args.show
+            args.save_dir or args.export_grid or args.html_report
         ) and not args.no_overlay:
             pil_img = origs[i][1].copy()
             pil_img = draw_overlay(

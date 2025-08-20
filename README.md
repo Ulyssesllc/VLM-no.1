@@ -124,6 +124,10 @@ Tham số đáng chú ý:
 - `--full-eval`: duyệt toàn bộ test_csv (bỏ qua sampling) và in metrics
 - `--metrics-json`: lưu metrics khi `--full-eval`
 
+Ghi chú cập nhật:
+- Cờ `--show` (trước đây từng xuất hiện) đã bị loại bỏ. Để xem kết quả hãy dùng `--save-dir` (lưu từng ảnh overlay) và/hoặc `--export-grid`.
+- Không cần thay đổi lệnh chạy khi nâng cấp PyTorch ≥2.6 (script tự xử lý tải checkpoint).
+
 Trả về nội bộ (khi gọi như module) bộ 3 `(results_meta, list_PIL_images, grid_image_or_None)`.
 
 ## 6. ITC Loss (tuỳ chọn)
