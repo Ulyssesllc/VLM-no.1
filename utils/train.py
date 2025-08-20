@@ -351,7 +351,9 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
             train_preds.extend(torch.argmax(logits, 1).cpu().tolist())
             train_targets.extend(label.cpu().tolist())
 
-            # Generator update
+            # Generator update (freeze discriminator to avoid accumulating its grads)
+            for p in model.parameters():
+                p.requires_grad = False
             for _ in range(max(1, args.gan_steps)):
                 g_opt.zero_grad(set_to_none=True)
                 with autocast(enabled=CONFIG.mixed_precision):
@@ -365,11 +367,11 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
                     fake_labels = torch.full(
                         (batch_size,), gen_label_index, dtype=torch.long, device=device
                     )
-                    with torch.no_grad():
-                        out_eval = model(fake_imgs, ref_ids, ref_att)
-                        logits_eval = (
-                            out_eval[0] if isinstance(out_eval, tuple) else out_eval
-                        )
+                    # Forward through discriminator WITH grad so generator receives gradient, discriminator params frozen
+                    out_eval = model(fake_imgs, ref_ids, ref_att)
+                    logits_eval = (
+                        out_eval[0] if isinstance(out_eval, tuple) else out_eval
+                    )
                     if args.adv_mode == "reinforce":
                         g_loss = nn.functional.cross_entropy(logits_eval, fake_labels)
                     else:
@@ -378,6 +380,8 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
                 g_scaler.step(g_opt)
                 g_scaler.update()
                 total_g_loss += float(g_loss.detach())
+            for p in model.parameters():
+                p.requires_grad = True
 
         # ---- Evaluation ----
         train_acc = accuracy_score(train_targets, train_preds)

@@ -14,27 +14,51 @@ Ví dụ:
 
 from __future__ import annotations
 import os
+import sys
 import random
 import argparse
 from typing import Dict, List
-
-import torch
-import torch.nn.functional as F
-from torchvision import transforms
-from PIL import Image
-import pandas as pd
-from transformers import BertTokenizer
-
-# Discriminator imports (phù hợp train.py mới)
-from discriminator.Contrastive import Q_cons_fusion  # type: ignore
-from discriminator.MLP import MLP_fusion  # type: ignore
-from discriminator.Q_former import Q_former_fusion  # type: ignore
-from discriminator.Q_bottleneck import Q_bottleneck  # type: ignore
-from discriminator.MoE import MoE as MoE_model  # type: ignore
-from PIL import ImageDraw, ImageFont
 import io
 import base64
 import json
+
+# ---------------------------------------------------------------------------
+# Path bootstrap (make sure project root containing 'discriminator' is on sys.path)
+# ---------------------------------------------------------------------------
+_CWD = os.getcwd()
+_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_CANDIDATES = {
+    _CWD,
+    os.path.dirname(_FILE_DIR),  # parent of utils
+    os.path.dirname(os.path.dirname(_FILE_DIR)),  # grandparent (in case nested)
+}
+for _p in list(_ROOT_CANDIDATES):
+    if _p and _p not in sys.path and os.path.isdir(_p):
+        # Heuristic: contains discriminator & generator folders
+        if os.path.isdir(os.path.join(_p, "discriminator")):
+            sys.path.insert(0, _p)
+
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from torchvision import transforms  # noqa: E402
+from PIL import Image, ImageDraw, ImageFont  # noqa: E402
+import pandas as pd  # noqa: E402
+from transformers import BertTokenizer  # noqa: E402
+
+# Discriminator imports with fallback diagnostics
+try:  # noqa: E402
+    from discriminator import (  # type: ignore
+        Q_cons_fusion,
+        MLP_fusion,
+        Q_former_fusion,
+        Q_bottleneck,
+        MoE,
+    )
+except ModuleNotFoundError as e:  # pragma: no cover
+    print("[ImportDebug] discriminator package not found. sys.path:")
+    for i, p in enumerate(sys.path[:30]):
+        print(f"  {i}: {p}")
+    raise e
 
 
 def _in_notebook() -> bool:
@@ -228,7 +252,7 @@ class _QBottleWrapper(torch.nn.Module):
 class _MoEWrapper(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.inner = MoE_model()
+        self.inner = MoE()
 
     def forward(self, img, input_ids, attention_mask):  # type: ignore
         logits, aux = self.inner(input_ids, attention_mask, img)
