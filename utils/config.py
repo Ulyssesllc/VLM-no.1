@@ -1,14 +1,11 @@
-"""Configuration for adidas_dataset (fake vs real) multimodal training workflow.
-
-Adapted from prior GLAMI-1M configuration.
-"""
+"""Configuration for adidas_dataset (fake vs real) multimodal training workflow."""
 
 from dataclasses import dataclass
 from typing import Optional
 
 
 @dataclass
-class GlamiConfig:
+class config:
     seed: int = 42
     batch_size: int = 256
     epochs: int = 15
@@ -26,4 +23,4 @@ class GlamiConfig:
     resume: Optional[str] = None  # path to checkpoint to resume
 
 
-CONFIG = GlamiConfig()
+CONFIG = config()

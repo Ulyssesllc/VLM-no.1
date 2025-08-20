@@ -1,14 +1,15 @@
-"""Visualization / reporting for adidas_dataset models.
+"""Visualization / reporting for adidas_dataset models (simplified to match new training workflow).
 
-CLI ví dụ:
-    python visualize_adidas.py --checkpoint ckpt.pth --model-type Q_cons_fusion \
-        --train-csv adidas_dataset/labels.csv --test-csv adidas_dataset/labels.csv \
-        --images adidas_dataset --num-samples 8 --show --export-grid
+Thay đổi chính so với phiên bản cũ:
+ - Import mô hình từ package `discriminator.*` (cùng như train.py mới).
+ - Thêm hỗ trợ các mô hình: Q_cons_fusion, MLP_fusion, Q_former_fusion, Q_bottleneck, MoE.
+ - Tham số `--disc_model` (alias: `--model-type` hoặc `--model`) để tương thích ngược.
+ - Tự xử lý tuple output (logits, ...); chỉ cần logits để suy luận.
+ - Lược bỏ một số tuỳ chọn ít dùng; vẫn giữ threshold / top1 decision.
 
-Trong notebook:
-    from visualize_adidas import parse_args, run_visualization
-    args = parse_args()
-    meta, imgs, grid = run_visualization(args)
+Ví dụ:
+    python visualize_adidas.py --checkpoint checkpoints/best_model_gan.pth \
+        --disc_model Q_cons_fusion --images adidas_dataset --num-samples 8 --show
 """
 
 from __future__ import annotations
@@ -23,7 +24,13 @@ from torchvision import transforms
 from PIL import Image
 import pandas as pd
 from transformers import BertTokenizer
-from Contrastive import Q_cons_fusion
+
+# Discriminator imports (phù hợp train.py mới)
+from discriminator.Contrastive import Q_cons_fusion  # type: ignore
+from discriminator.MLP import MLP_fusion  # type: ignore
+from discriminator.Q_former import Q_former_fusion  # type: ignore
+from discriminator.Q_bottleneck import Q_bottleneck  # type: ignore
+from discriminator.MoE import MoE as MoE_model  # type: ignore
 from PIL import ImageDraw, ImageFont
 import io
 import base64
@@ -50,12 +57,6 @@ def _notebook_display(img):  # pragma: no cover
         pass
 
 
-try:
-    from MLP import MLP_fusion  # type: ignore
-except Exception:
-    MLP_fusion = None  # fallback if import fails
-
-
 def parse_args():
     p = argparse.ArgumentParser(
         description="Console visualize adidas_dataset predictions (no file outputs)"
@@ -64,7 +65,19 @@ def parse_args():
         "--checkpoint", required=True, help="Path to model checkpoint (.pth)"
     )
     p.add_argument(
-        "--model-type", choices=["Q_cons_fusion", "MLP_fusion"], default="Q_cons_fusion"
+        "--disc_model",
+        "--model-type",
+        "--model",
+        dest="disc_model",
+        choices=[
+            "Q_cons_fusion",
+            "MLP_fusion",
+            "Q_former_fusion",
+            "Q_bottleneck",
+            "MoE",
+        ],
+        default="Q_cons_fusion",
+        help="Tên mô hình discriminator dùng khi suy luận",
     )
     p.add_argument("--train-csv", default="adidas_dataset/labels.csv")
     p.add_argument("--test-csv", default="adidas_dataset/labels.csv")
@@ -105,7 +118,7 @@ def parse_args():
     p.add_argument(
         "--inline-html",
         action="store_true",
-        help="Hiển thị inline HTML grid ảnh gốc + thông số (notebook). Không chỉnh sửa ảnh.",
+        help="Hiển thị inline HTML grid ảnh gốc + thông số (notebook).",
     )
     p.add_argument(
         "--grid-cols",
@@ -134,13 +147,13 @@ def parse_args():
         "--threshold",
         type=float,
         default=0.40,
-        help="Ngưỡng xác suất để phân loại (>= threshold => positive-label). Mặc định 0.40.",
+        help="Ngưỡng xác suất quyết định lớp dương (binary).",
     )
     p.add_argument(
         "--positive-label",
         type=str,
         default="fake",
-        help="Tên lớp dương (ví dụ 'fake'). Không phân biệt hoa thường.",
+        help="Tên lớp dương (binary).",
     )
     p.add_argument(
         "--only-decision",
@@ -202,16 +215,40 @@ def strip_module(state_dict):
     }
 
 
+class _QBottleWrapper(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.inner = Q_bottleneck()
+
+    def forward(self, img, input_ids, attention_mask):  # type: ignore
+        logits, aux, q1, q2 = self.inner(input_ids, attention_mask, img)
+        return logits, q1, q2
+
+
+class _MoEWrapper(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.inner = MoE_model()
+
+    def forward(self, img, input_ids, attention_mask):  # type: ignore
+        logits, aux = self.inner(input_ids, attention_mask, img)
+        # Duplicate logits to mimic (logits, img_feat, txt_feat)
+        return logits, logits, logits
+
+
 def load_model(args, num_classes: int):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if args.model_type == "Q_cons_fusion":
-        model = Q_cons_fusion()
-    else:
-        if MLP_fusion is None:
-            raise RuntimeError(
-                "MLP_fusion not available; cannot visualize this model type."
-            )
-        model = MLP_fusion()
+    name = args.disc_model
+    if name == "Q_cons_fusion":
+        model = Q_cons_fusion(num_classes=num_classes)
+    elif name == "MLP_fusion":
+        model = MLP_fusion(num_classes=num_classes)
+    elif name == "Q_former_fusion":
+        model = Q_former_fusion(num_classes=num_classes)
+    elif name == "Q_bottleneck":
+        model = _QBottleWrapper()
+    else:  # MoE
+        model = _MoEWrapper()
     ckpt = torch.load(args.checkpoint, map_location=device)
     sd = ckpt.get("model_state", ckpt)
     sd = strip_module(sd)
@@ -228,23 +265,14 @@ def load_model(args, num_classes: int):
     return model, device
 
 
-def predict(model, device, batch_imgs, batch_text_inputs, model_type):
+def predict(model, device, batch_imgs, batch_text_inputs):
     with torch.no_grad():
-        if model_type == "Q_cons_fusion":
-            logits, _, _ = model(
-                batch_imgs,
-                batch_text_inputs["input_ids"],
-                batch_text_inputs["attention_mask"],
-            )
-        else:
-            try:
-                logits = model(
-                    batch_imgs,
-                    batch_text_inputs["input_ids"],
-                    batch_text_inputs["attention_mask"],
-                )
-            except Exception:
-                logits = model(batch_imgs, batch_text_inputs["raw_text"])  # type: ignore
+        out = model(
+            batch_imgs,
+            batch_text_inputs["input_ids"],
+            batch_text_inputs["attention_mask"],
+        )
+        logits = out[0] if isinstance(out, tuple) else out
     return F.softmax(logits, dim=1)
 
 
@@ -341,7 +369,7 @@ def run_visualization(args):
     tokenized = {
         k: (v.to(device) if torch.is_tensor(v) else v) for k, v in tokenized.items()
     }
-    probs = predict(model, device, batch_imgs, tokenized, args.model_type)
+    probs = predict(model, device, batch_imgs, tokenized)
     results_meta, out_images = [], []
     for i, (_idx, row) in enumerate(samples.iterrows()):
         p = probs[i]
@@ -401,7 +429,7 @@ def run_visualization(args):
                     ]
                 )
                 print(
-                    f"--- Sample {i} ---\nImage: {origs[i][0]}\nGT | Pred(top1): {gt} | {pred_name}\nDecision(threshold={args.threshold:.2f} on '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})\nTopK: {topk_str}"
+                    f"--- Sample {i} ---\nImage: {origs[i][0]}\nGT | Pred: {gt} | {pred_name}\nDecision(thr={args.threshold:.2f} '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})\nTopK: {topk_str}"
                 )
         if (
             args.save_dir or args.export_grid or args.html_report or args.show
