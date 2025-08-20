@@ -118,9 +118,6 @@ def parse_args():
     )
     p.add_argument("--sample-strategy", choices=["random", "first"], default="random")
     p.add_argument(
-        "--show", action="store_true", help="Mở cửa sổ xem ảnh với overlay kết quả"
-    )
-    p.add_argument(
         "--save-dir",
         type=str,
         default=None,
@@ -189,6 +186,32 @@ def parse_args():
         choices=["threshold", "top1"],
         default="threshold",
         help="threshold: dùng ngưỡng p_pos; top1: luôn chọn lớp xác suất cao nhất làm decision",
+    )
+    p.add_argument(
+        "--full-eval",
+        action="store_true",
+        help="Đánh giá toàn bộ test_csv (bỏ qua --num-samples) và in metrics tổng hợp",
+    )
+    p.add_argument(
+        "--metrics-json",
+        type=str,
+        default=None,
+        help="Lưu metrics tổng hợp (nếu --full-eval) ra file JSON",
+    )
+    p.add_argument(
+        "--print-label-map",
+        action="store_true",
+        help="In label_map rồi thoát (hữu ích để kiểm tra thứ tự lớp)",
+    )
+    p.add_argument(
+        "--no-softmax",
+        action="store_true",
+        help="Hiển thị logits thay vì xác suất (debug)",
+    )
+    p.add_argument(
+        "--headless",
+        action="store_true",
+        help="Bỏ qua mọi hành động mở viewer (.show) để tránh lỗi xdg-open",
     )
     return p.parse_args()
 
@@ -286,6 +309,15 @@ def load_model(args, num_classes: int):
             f"[Warn] Unexpected keys (partial): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}"
         )
     model.eval().to(device)
+    # Show checkpoint metric info if present
+    best_metric = ckpt.get("best_metric") or ckpt.get("best_acc")
+    select_metric = ckpt.get("select_metric") or ("acc" if "best_acc" in ckpt else None)
+    if (
+        best_metric is not None
+        and select_metric
+        and not getattr(args, "no_console", False)
+    ):
+        print(f"[CKPT] Stored best {select_metric}: {best_metric:.4f}")
     return model, device
 
 
@@ -297,7 +329,46 @@ def predict(model, device, batch_imgs, batch_text_inputs):
             batch_text_inputs["attention_mask"],
         )
         logits = out[0] if isinstance(out, tuple) else out
-    return F.softmax(logits, dim=1)
+    if getattr(batch_text_inputs, "no_softmax", False):  # unlikely path
+        return logits
+    return logits
+
+
+def to_prob(logits, use_softmax=True):
+    return F.softmax(logits, dim=1) if use_softmax else logits
+
+
+def compute_metrics(all_preds, all_targets, num_classes):
+    from sklearn.metrics import (
+        accuracy_score,
+        precision_recall_fscore_support,
+        balanced_accuracy_score,
+        confusion_matrix,
+    )
+
+    acc = accuracy_score(all_targets, all_preds)
+    pr, rc, f1, sup = precision_recall_fscore_support(
+        all_targets, all_preds, labels=list(range(num_classes)), zero_division=0
+    )
+    macro_f1 = f1.mean() if len(f1) else 0.0
+    bal_acc = balanced_accuracy_score(all_targets, all_preds)
+    cm = confusion_matrix(
+        all_targets, all_preds, labels=list(range(num_classes))
+    ).tolist()
+    minority_idx = sup.tolist().index(min(sup)) if len(sup) else 0
+    metrics = {
+        "acc": acc,
+        "macro_f1": macro_f1,
+        "bal_acc": bal_acc,
+        "recall_minority": float(rc[minority_idx]) if len(rc) else 0.0,
+        "per_class_precision": pr.tolist(),
+        "per_class_recall": rc.tolist(),
+        "per_class_f1": f1.tolist(),
+        "support": sup.tolist(),
+        "confusion_matrix": cm,
+        "minority_index": minority_idx,
+    }
+    return metrics
 
 
 def draw_overlay(pil_img: Image.Image, lines: List[str]) -> Image.Image:
@@ -366,7 +437,16 @@ def run_visualization(args):
         negative_label = ",".join(
             [label_map_inv[i] for i in label_map_inv if i != positive_index]
         )
-    samples = load_samples(args.test_csv, args.num_samples, args.sample_strategy)
+    if args.print_label_map:
+        print("Label map:")
+        for name, idx in label_map.items():
+            print(f"  {idx}: {name}")
+        return [], [], None
+    samples = (
+        pd.read_csv(args.test_csv, sep=";")
+        if args.full_eval
+        else load_samples(args.test_csv, args.num_samples, args.sample_strategy)
+    )
     transform = build_transform()
     tokenizer = BertTokenizer.from_pretrained("bert-base-multilingual-cased")
     images_t, origs, texts = [], [], []
@@ -393,29 +473,33 @@ def run_visualization(args):
     tokenized = {
         k: (v.to(device) if torch.is_tensor(v) else v) for k, v in tokenized.items()
     }
-    probs = predict(model, device, batch_imgs, tokenized)
-    results_meta, out_images = [], []
+    logits = predict(model, device, batch_imgs, tokenized)
+    probs = to_prob(logits, use_softmax=not args.no_softmax)
+    results_meta: List[dict] = []
+    out_images: List[Image.Image] = []
     for i, (_idx, row) in enumerate(samples.iterrows()):
         p = probs[i]
-        topv, topi = p.topk(min(args.top_k, p.size(0)))
+        k = min(args.top_k, p.size(0))
+        topv, topi = p.topk(k)
         topk_pairs = list(zip(topv.tolist(), topi.tolist()))
         pred_idx = int(topi[0])
         gt_col = "label" if "label" in row else "category_name"
         gt = row[gt_col]
         pred_name = label_map_inv.get(pred_idx, str(pred_idx))
-        pos_prob = (
-            float(p[positive_index]) if positive_index < p.size(0) else float(p.max())
-        )
+        if args.no_softmax:
+            sm = F.softmax(p, dim=0)
+            pos_prob = float(sm[positive_index]) if positive_index < p.size(0) else 0.0
+        else:
+            pos_prob = float(p[positive_index]) if positive_index < p.size(0) else 0.0
         if args.decision_mode == "top1":
-            decision = (
-                pred_name
-                if (len(label_map_inv) > 2 or pred_idx == positive_index)
-                else (
+            if len(label_map_inv) > 2:
+                decision = pred_name
+            else:
+                decision = (
                     label_map_inv[positive_index]
                     if pred_idx == positive_index
                     else negative_label
                 )
-            )
         else:
             decision = (
                 label_map_inv[positive_index]
@@ -436,25 +520,7 @@ def run_visualization(args):
             "text": texts[i],
         }
         results_meta.append(rec)
-        if not args.no_console:
-            if args.only_decision:
-                topk_inline = ";".join(
-                    [
-                        f"{label_map_inv.get(idx, idx)}:{val:.3f}"
-                        for val, idx in topk_pairs
-                    ]
-                )
-                print(f"{i}\t{decision}\t{pos_prob:.4f}\t{topk_inline}")
-            else:
-                topk_str = ", ".join(
-                    [
-                        f"{label_map_inv.get(idx, str(idx))}({val:.2f})"
-                        for val, idx in topk_pairs
-                    ]
-                )
-                print(
-                    f"--- Sample {i} ---\nImage: {origs[i][0]}\nGT | Pred: {gt} | {pred_name}\nDecision(thr={args.threshold:.2f} '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})\nTopK: {topk_str}"
-                )
+        # overlay
         if (
             args.save_dir or args.export_grid or args.html_report or args.show
         ) and not args.no_overlay:
@@ -489,8 +555,44 @@ def run_visualization(args):
                 if not args.no_console:
                     print(f"[Warn] Không lưu được {out_path}: {e}")
         out_images.append(pil_img)
+        if not args.no_console:
+            if args.only_decision:
+                topk_inline = ";".join(
+                    [
+                        f"{label_map_inv.get(idx, idx)}:{val:.3f}"
+                        for val, idx in topk_pairs
+                    ]
+                )
+                print(f"{i}\t{decision}\t{pos_prob:.4f}\t{topk_inline}")
+            else:
+                topk_str = ", ".join(
+                    [
+                        f"{label_map_inv.get(idx, str(idx))}({val:.2f})"
+                        for val, idx in topk_pairs
+                    ]
+                )
+                print(
+                    f"--- Sample {i} ---\nImage: {origs[i][0]}\nGT | Pred: {gt} | {pred_name}\nDecision(thr={args.threshold:.2f} '{label_map_inv[positive_index]}'): {decision} (p_pos={pos_prob:.3f})\nTopK: {topk_str}"
+                )
+    # grid build start
     grid_img = None
     if args.export_grid and out_images:
+        import math
+
+        cols = getattr(args, "grid_cols", 4)
+        w, h = out_images[0].size
+        rows = math.ceil(len(out_images) / cols)
+        grid_img = Image.new("RGB", (cols * w, rows * h), (0, 0, 0))
+        for idx, im in enumerate(out_images):
+            r, c = divmod(idx, cols)
+            grid_img.paste(im, (c * w, r * h))
+        if args.save_dir:
+            try:
+                grid_path = os.path.join(args.save_dir, "_grid.jpg")
+                grid_img.save(grid_path)
+            except Exception as e:
+                if not args.no_console:
+                    print(f"[Warn] Không lưu grid: {e}")
         import math
 
         cols = getattr(args, "grid_cols", 4)
@@ -553,92 +655,29 @@ def run_visualization(args):
         except Exception as e:
             if not args.no_console:
                 print(f"[Warn] Không tạo HTML: {e}")
-    # inline HTML (original images + text, no overlay) for notebook
-    if args.inline_html and out_images:
-        if _in_notebook():
+    # Viewing utilities removed to keep script minimal
+    # Aggregate metrics if full eval
+    if args.full_eval:
+        pred_indices = [m["pred_top1"] for m in results_meta]
+        # map back to class index
+        inv_map_name_to_idx = {v: k for k, v in label_map_inv.items()}
+        pred_idx_seq = [inv_map_name_to_idx.get(name, 0) for name in pred_indices]
+        gt_idx_seq = [inv_map_name_to_idx.get(m["gt"], 0) for m in results_meta]
+        metrics = compute_metrics(pred_idx_seq, gt_idx_seq, num_classes=len(label_map))
+        if not args.no_console:
+            print("\n=== Aggregate Metrics (full-eval) ===")
+            for k in ["acc", "macro_f1", "bal_acc", "recall_minority"]:
+                print(f"{k}: {metrics[k]:.4f}")
+            print("Confusion Matrix (rows=gt, cols=pred):")
+            for row in metrics["confusion_matrix"]:
+                print(row)
+        if args.metrics_json:
             try:
-                from IPython.display import HTML, display  # type: ignore
-
-                html_cards = []
-                for rec, (orig_path, _orig_pil), p in zip(results_meta, origs, probs):
-                    # original image (not overlay)
-                    try:
-                        with Image.open(orig_path).convert("RGB") as _tmp_im:
-                            buf = io.BytesIO()
-                            _tmp_im.save(buf, format="JPEG")
-                            b64o = base64.b64encode(buf.getvalue()).decode("utf-8")
-                    except Exception:
-                        b64o = ""
-                    topk_html = "<br>".join(
-                        [f"{t['label']}:{t['prob']:.2f}" for t in rec["topk"]]
-                    )
-                    html_cards.append(
-                        "<div style='margin:6px;border:1px solid #ccc;padding:6px;width:180px;font-size:12px;font-family:Arial;'>"
-                        f"<div style='font-weight:bold'>{rec['decision']} ({rec['pos_prob']:.2f})</div>"
-                        + (
-                            f"<img src='data:image/jpeg;base64,{b64o}' style='width:160px;display:block;margin:4px auto;'/>"
-                            if b64o
-                            else "<div style='width:160px;height:120px;background:#eee'></div>"
-                        )
-                        + f"<div style='color:#555'>GT: {rec['gt']}</div>"
-                        + f"<div>TopK:<br>{topk_html}</div>"
-                        + "</div>"
-                    )
-                html_block = (
-                    "<div style='display:flex;flex-wrap:wrap'>"
-                    + "".join(html_cards)
-                    + "</div>"
-                )
-                display(HTML(html_block))
-            except Exception:
+                with open(args.metrics_json, "w", encoding="utf-8") as f:
+                    json.dump(metrics, f, ensure_ascii=False, indent=2)
+            except Exception as e:
                 if not args.no_console:
-                    print("[Warn] Inline HTML thất bại")
-
-    # show images if requested (after grid maybe)
-    if args.show:
-        if _in_notebook():
-            for i, im in enumerate(out_images):
-                _notebook_display(im)
-            if grid_img:
-                _notebook_display(grid_img)
-        else:
-            try:
-                for im in out_images:
-                    im.show()
-                if grid_img:
-                    grid_img.show()
-            except Exception:
-                if not args.no_console:
-                    print("[Info] Headless environment: skip .show()")
-    # Optional matplotlib grid
-    if args.mpl_grid and out_images:
-        try:
-            import math
-            import matplotlib.pyplot as plt  # type: ignore
-
-            cols = getattr(args, "grid_cols", 4)
-            rows = math.ceil(len(out_images) / cols)
-            fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
-            if not isinstance(axes, (list, tuple)):
-                axes = axes.reshape(-1)
-            axes_flat = axes.ravel()
-            for idx, (ax, im, rec) in enumerate(
-                zip(axes_flat, out_images, results_meta)
-            ):
-                ax.imshow(im)
-                ax.set_title(f"{rec['decision']} ({rec['pos_prob']:.2f})", fontsize=8)
-                ax.axis("off")
-            for j in range(len(out_images), len(axes_flat)):
-                axes_flat[j].axis("off")
-            plt.tight_layout()
-            try:
-                plt.show()
-            except Exception:
-                if not args.no_console:
-                    print("[Info] Headless environment: skip matplotlib show")
-        except Exception as e:
-            if not args.no_console:
-                print(f"[Warn] matplotlib grid thất bại: {e}")
+                    print(f"[Warn] Không ghi metrics JSON: {e}")
     return results_meta, out_images, grid_img
 
 

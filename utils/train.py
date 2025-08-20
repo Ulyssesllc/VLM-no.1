@@ -23,7 +23,12 @@ import torch.nn as nn  # noqa: E402
 from torch.optim import AdamW  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 from torch.cuda.amp import autocast, GradScaler  # noqa: E402
-from sklearn.metrics import accuracy_score  # noqa: E402
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    confusion_matrix,
+    balanced_accuracy_score,
+)  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
 from discriminator import (  # type: ignore  # noqa: E402
@@ -67,7 +72,7 @@ if not os.path.isfile(MASTER_CSV):
 label_map = build_label_map(MASTER_CSV, label_column="label")
 
 
-def args():
+def args():  # kept name for backward CLI compatibility
     parser = argparse.ArgumentParser(description="Simplified training (GAN always on)")
     disc_choices = [
         "Q_cons_fusion",
@@ -128,6 +133,12 @@ def args():
         help="Chọn hàm loss: ce hoặc focal (tùy chọn, vẫn nhẹ).",
     )
     parser.add_argument(
+        "--class_weight",
+        choices=["none", "auto"],
+        default="none",
+        help="Tự động gán trọng số lớp (inverse freq) cho CrossEntropy (bỏ qua khi focal).",
+    )
+    parser.add_argument(
         "--gamma", type=float, default=2.0, help="Gamma cho focal (nếu dùng)"
     )
     # --- GAN joint training options ---
@@ -179,6 +190,17 @@ def args():
         default=0.25,
         help="Tỷ lệ số mẫu synthetic so với batch size thật mỗi batch",
     )
+    parser.add_argument(
+        "--select_metric",
+        choices=["acc", "macro_f1", "bal_acc", "recall_minority"],
+        default="acc",
+        help="Tiêu chí chọn checkpoint tốt nhất.",
+    )
+    parser.add_argument(
+        "--no_itc",
+        action="store_true",
+        help="Tắt ITC loss (bắt buộc nếu mô hình không trả về image/text feat).",
+    )
     return parser.parse_args()
 
 
@@ -227,18 +249,53 @@ def evaluate_simple(model, dataloader, device):
             logits = out[0] if isinstance(out, tuple) else out
             preds.extend(torch.argmax(logits, 1).cpu().tolist())
             targets.extend(label.cpu().tolist())
-    return accuracy_score(targets, preds)
+    return accuracy_score(targets, preds), preds, targets
+
+
+def compute_metrics(preds, targets, num_classes, minority_index=None):
+    acc = accuracy_score(targets, preds)
+    bal_acc = balanced_accuracy_score(targets, preds)
+    pr, rc, f1, sup = precision_recall_fscore_support(
+        targets, preds, labels=list(range(num_classes)), zero_division=0
+    )
+    macro_f1 = f1.mean()
+    if minority_index is None:
+        # minority = class with min support
+        minority_index = int(min(range(num_classes), key=lambda i: sup[i]))
+    recall_min = rc[minority_index]
+    cm = confusion_matrix(targets, preds, labels=list(range(num_classes)))
+    metrics = {
+        "acc": acc,
+        "bal_acc": bal_acc,
+        "macro_f1": macro_f1,
+        "recall_minority": recall_min,
+        "per_class_precision": pr.tolist(),
+        "per_class_recall": rc.tolist(),
+        "per_class_f1": f1.tolist(),
+        "support": sup.tolist(),
+        "confusion_matrix": cm.tolist(),
+    }
+    return metrics
 
 
 def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
-    """Hợp nhất tất cả mode: normal / focal / with_gan.
+    """Train classifier with optional focal loss + always-on GAN augmentation.
 
-    If args.with_gan=True sẽ khởi tạo generator và thêm synthetic augmentation.
+    Only essential logic retained: core forward, optional synthetic batch each step,
+    generator adversarial reinforcement/confuse modes, basic metric selection.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     use_focal = args.loss_type == "focal"
-    ce_loss = None if use_focal else nn.CrossEntropyLoss()
+    # Placeholder for (optionally) weighted CE (weights injected via global _CLASS_WEIGHTS)
+    ce_loss = None
+    if not use_focal:
+        weights = globals().get("_CLASS_WEIGHTS", None)
+        if weights is not None:
+            device_w = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            ce_loss = nn.CrossEntropyLoss(weight=weights.to(device_w))
+        else:
+            ce_loss = nn.CrossEntropyLoss()
 
     params = (
         model.module.parameters() if hasattr(model, "module") else model.parameters()
@@ -263,7 +320,7 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
     g_opt = AdamW(generator.parameters(), lr=args.gan_lr, weight_decay=1e-4)
     g_scaler = GradScaler(enabled=CONFIG.mixed_precision)
 
-    best_acc, best_epoch, no_improve = 0.0, 0, 0
+    best_score, best_epoch, no_improve = 0.0, 0, 0
     batch_size = CONFIG.batch_size
 
     stop_training = False
@@ -297,7 +354,11 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
                     cls_loss = ce_loss(logits, label)
                 itc = (
                     compute_itc_loss(logit_img, logit_text)
-                    if (logit_img is not None and logit_text is not None)
+                    if (
+                        not args.no_itc
+                        and logit_img is not None
+                        and logit_text is not None
+                    )
                     else 0.0
                 )
                 loss = cls_loss + itc
@@ -367,15 +428,13 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
                     fake_labels = torch.full(
                         (batch_size,), gen_label_index, dtype=torch.long, device=device
                     )
-                    # Forward through discriminator WITH grad so generator receives gradient, discriminator params frozen
+                    # Forward with grad (model params frozen) so generator gets signal
                     out_eval = model(fake_imgs, ref_ids, ref_att)
                     logits_eval = (
                         out_eval[0] if isinstance(out_eval, tuple) else out_eval
                     )
-                    if args.adv_mode == "reinforce":
-                        g_loss = nn.functional.cross_entropy(logits_eval, fake_labels)
-                    else:
-                        g_loss = -nn.functional.cross_entropy(logits_eval, fake_labels)
+                    ce_g = nn.functional.cross_entropy(logits_eval, fake_labels)
+                    g_loss = ce_g if args.adv_mode == "reinforce" else -ce_g
                 g_scaler.scale(g_loss).backward()
                 g_scaler.step(g_opt)
                 g_scaler.update()
@@ -385,7 +444,14 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
 
         # ---- Evaluation ----
         train_acc = accuracy_score(train_targets, train_preds)
-        test_acc = evaluate_simple(model, eval_loader, device)
+        test_acc, test_preds, test_targets = evaluate_simple(model, eval_loader, device)
+        test_metrics = compute_metrics(
+            test_preds,
+            test_targets,
+            num_classes=len(set(test_targets + train_targets)),
+            minority_index=gen_label_index,
+        )
+        select_value = test_metrics[args.select_metric]
         if scheduler:
             if CONFIG.scheduler == "plateau":
                 scheduler.step(1 - test_acc)
@@ -395,16 +461,17 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
         avg_loss = total_loss / len(dataloader)
         avg_g = total_g_loss / len(dataloader)
         log_message = (
-            f"[GAN] Epoch {epoch + 1}/{CONFIG.epochs} | GLoss {avg_g:.4f} | Loss {avg_loss:.4f} | "
-            f"TrainAcc {train_acc:.4f} | TestAcc {test_acc:.4f} | LR {optimizer.param_groups[0]['lr']:.2e} | {elapsed:.1f}s | Gen={args.gen_model}"
+            f"[GAN] Ep {epoch + 1}/{CONFIG.epochs} | GLoss {avg_g:.4f} | Loss {avg_loss:.4f} | TrainAcc {train_acc:.4f} | "
+            f"TestAcc {test_metrics['acc']:.4f} | MacroF1 {test_metrics['macro_f1']:.4f} | BalAcc {test_metrics['bal_acc']:.4f} | "
+            f"RecMin {test_metrics['recall_minority']:.4f} | Sel({args.select_metric}) {select_value:.4f} | LR {optimizer.param_groups[0]['lr']:.2e} | {elapsed:.1f}s"
         )
         print(log_message)
         with open(
             os.path.join(CONFIG.log_dir, "train_log.txt"), "a", encoding="utf-8"
         ) as f:
             f.write(log_message + "\n")
-        if test_acc > best_acc:
-            best_acc = test_acc
+        if select_value > best_score:
+            best_score = select_value
             best_epoch = epoch + 1
             no_improve = 0
             ckpt = {
@@ -417,16 +484,19 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
                 "g_scaler_state": g_scaler.state_dict()
                 if CONFIG.mixed_precision
                 else None,
-                "best_acc": best_acc,
+                "best_metric": best_score,
+                "select_metric": args.select_metric,
                 "config": CONFIG.__dict__,
             }
             torch.save(ckpt, os.path.join(CONFIG.checkpoint_dir, "best_model_gan.pth"))
-            print(f"Saved best GAN model (acc {best_acc:.4f})")
+            print(
+                f"Saved best model ({args.select_metric} {best_score:.4f}) at epoch {epoch + 1}"
+            )
         else:
             no_improve += 1
             if no_improve >= CONFIG.patience:
                 print(
-                    f"Early stopping (GAN) tại epoch {epoch + 1} (best acc {best_acc:.4f} @ epoch {best_epoch})"
+                    f"Early stopping tại epoch {epoch + 1} (best {args.select_metric} {best_score:.4f} @ epoch {best_epoch})"
                 )
                 # Save final state before break
                 torch.save(
@@ -434,7 +504,8 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
                         "epoch": epoch,
                         "model_state": model.state_dict(),
                         "generator_state": generator.state_dict(),
-                        "best_acc": best_acc,
+                        "best_metric": best_score,
+                        "select_metric": args.select_metric,
                     },
                     os.path.join(CONFIG.checkpoint_dir, "early_stop_model_gan.pth"),
                 )
@@ -446,13 +517,14 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
             "optimizer_state": optimizer.state_dict(),
             "generator_state": generator.state_dict(),
             "g_optimizer_state": g_opt.state_dict(),
-            "best_acc": best_acc,
+            "best_metric": best_score,
+            "select_metric": args.select_metric,
         }
         torch.save(ckpt_last, os.path.join(CONFIG.checkpoint_dir, "last_model_gan.pth"))
         if stop_training:
             break
 
-    return best_acc
+    return best_score
 
 
 def test(model, dataloader):  # retained for API compatibility
@@ -462,53 +534,34 @@ def test(model, dataloader):  # retained for API compatibility
 
 
 def build_discriminator(name: str, num_classes: int, device: torch.device):
-    """Return DataParallel-wrapped discriminator model by name."""
+    class QBottleWrap(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = Q_bottleneck()
 
-    if name == "Q_bottleneck":
+        def forward(self, img, input_ids, attention_mask):
+            logits, _aux, q1, q2 = self.inner(input_ids, attention_mask, img)
+            return logits, q1, q2
 
-        class Wrapper(nn.Module):
-            def __init__(self, inner):
-                super().__init__()
-                self.inner = inner
+    class MoEWrap(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = MoE(num_classes=num_classes)
 
-            def forward(self, img, input_ids, attention_mask):
-                logits, aux_loss, q1, q2 = self.inner(input_ids, attention_mask, img)
-                return logits, q1, q2
+        def forward(self, img, input_ids, attention_mask):
+            logits, _aux = self.inner(input_ids, attention_mask, img)
+            return logits, logits, logits
 
-        model = torch.nn.DataParallel(Wrapper(Q_bottleneck())).to(device)
-        return model
-
-    if name == "MoE":
-
-        class MoEWrapper(nn.Module):
-            def __init__(self, inner):
-                super().__init__()
-                self.inner = inner
-
-            def forward(self, img, input_ids, attention_mask):
-                logits, aux_loss = self.inner(input_ids, attention_mask, img)
-                # duplicate logits to mimic (img,text) feats for ITC compatibility
-                return logits, logits, logits
-
-        model = torch.nn.DataParallel(MoE(num_classes=num_classes)).to(device)
-        return torch.nn.DataParallel(MoEWrapper(MoE(num_classes=num_classes))).to(
-            device
-        )
-
-    DISC_MAP = {
-        "Q_cons_fusion": lambda: torch.nn.DataParallel(
-            Q_cons_fusion(num_classes=num_classes)
-        ).to(device),
-        "MLP_fusion": lambda: torch.nn.DataParallel(
-            MLP_fusion(num_classes=num_classes)
-        ).to(device),
-        "Q_former_fusion": lambda: torch.nn.DataParallel(
-            Q_former_fusion(num_classes=num_classes)
-        ).to(device),
+    base = {
+        "Q_cons_fusion": lambda: Q_cons_fusion(num_classes=num_classes),
+        "MLP_fusion": lambda: MLP_fusion(num_classes=num_classes),
+        "Q_former_fusion": lambda: Q_former_fusion(num_classes=num_classes),
+        "Q_bottleneck": QBottleWrap,
+        "MoE": MoEWrap,
     }
-    if name not in DISC_MAP:
+    if name not in base:
         raise ValueError(f"Unknown discriminator: {name}")
-    return DISC_MAP[name]()
+    return torch.nn.DataParallel(base[name]()).to(device)
 
 
 if __name__ == "__main__":
@@ -570,7 +623,7 @@ if __name__ == "__main__":
 
     # Class weights & sampler
     train_labels_list = list(train_dataset.df[train_dataset.label_column])
-    # Determine target label for generator (luôn cần)
+    # Determine target label for generator (luôn cần) + chuẩn bị class counts
     gen_label_index = None
     if args.gen_label is not None:
         name_norm = args.gen_label.lower().strip()
@@ -582,12 +635,25 @@ if __name__ == "__main__":
             print(
                 f"[WARN] gen_label '{args.gen_label}' không tìm thấy -> dùng lớp thiểu số"
             )
+    counts_tmp2 = {k: 0 for k in label_map.keys()}
+    for lab in train_labels_list:
+        counts_tmp2[lab] += 1
     if gen_label_index is None:
-        counts_tmp2 = {k: 0 for k in label_map.keys()}
-        for lab in train_labels_list:
-            counts_tmp2[lab] += 1
         minority_name = min(counts_tmp2, key=counts_tmp2.get)
         gen_label_index = label_map[minority_name]
+    # Build inverse frequency weights if requested
+    if args.class_weight == "auto":
+        total = sum(counts_tmp2.values())
+        class_weights = []
+        for name, idx in sorted(label_map.items(), key=lambda x: x[1]):
+            freq = counts_tmp2[name]
+            w = total / (len(label_map) * max(1, freq))
+            class_weights.append(w)
+        wt_tensor = torch.tensor(class_weights, dtype=torch.float32)
+        # inject into CONFIG for visibility (optional)
+        CONFIG.class_weights = class_weights  # type: ignore
+    else:
+        wt_tensor = None
     print(
         f"Generator target label index: {gen_label_index} ({list(label_map.keys())[gen_label_index]}) | adv_mode={args.adv_mode}"
     )
@@ -622,5 +688,19 @@ if __name__ == "__main__":
     )
     # Chọn discriminator (mapping-based)
     model = build_discriminator(args.disc_model, num_classes, device)
+
+    # Provide weighted CE to unified_train via closure hack (monkey patch) if needed
+    if "ce_loss" in unified_train.__code__.co_varnames:
+        pass  # leave as is
+    # Simpler: attach global for weights (used inside unified_train)
+    if wt_tensor is not None:
+        # Move to device later inside training if needed
+        global _CLASS_WEIGHTS
+        _CLASS_WEIGHTS = wt_tensor
+    else:
+        _CLASS_WEIGHTS = None
+
+    # Monkey patch: redefine ce_loss inside unified_train scope not trivial; easier to wrap model training by adjusting loss calc
+    # So we adapt by setting CONFIG flag and modify ce_loss creation earlier if needed (light approach)
 
     unified_train(model, train_data, test_data, args, gen_label_index)
