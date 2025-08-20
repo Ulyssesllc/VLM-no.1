@@ -5,35 +5,44 @@ discovery, history JSON, class weighting, weighted sampler. Focus on core traini
 """
 
 import os
+import sys
 import time
 import random
 import argparse
 import multiprocessing
 
-# (Pandas removed to reduce import overhead)
-import torch
-import torch.nn as nn
-from torch.optim import AdamW
-from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
-from sklearn.metrics import accuracy_score
-from tqdm import tqdm
+"""Path & import setup"""
+# (imports kept at top to satisfy linters; path injection after stdlib imports)
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:  # ensure project root resolvable
+    sys.path.insert(0, ROOT_DIR)
 
-# Import discriminator models from package "discriminator" explicitly
-from discriminator.Contrastive import Q_cons_fusion, compute_itc_loss  # type: ignore
-from discriminator.MLP import MLP_fusion  # type: ignore
-from discriminator.Q_former import Q_former_fusion  # type: ignore
-from discriminator.Q_bottleneck import Q_bottleneck  # type: ignore
-from discriminator.MoE import MoE as MoE_model  # type: ignore
-from process_data import MyData, build_label_map
-from config import CONFIG
+# Third-party imports (after path injection so local packages resolve)
+import torch  # noqa: E402
+import torch.nn as nn  # noqa: E402
+from torch.optim import AdamW  # noqa: E402
+from torch.utils.data import DataLoader  # noqa: E402
+from torch.cuda.amp import autocast, GradScaler  # noqa: E402
+from sklearn.metrics import accuracy_score  # noqa: E402
+from tqdm import tqdm  # noqa: E402
 
-# Import simplified generator classes directly
-from generator.infogan import InfoGANGenerator  # type: ignore
-from generator.clustergan import ClusterGANGenerator  # type: ignore
-from generator.pix2pix import Pix2PixGenerator  # type: ignore
-from generator.bicyclegan import BicycleGANGenerator  # type: ignore
-from generator.discogan import DiscoGANGenerator  # type: ignore
+from discriminator import (  # type: ignore  # noqa: E402
+    Q_cons_fusion,
+    compute_itc_loss,
+    MLP_fusion,
+    Q_former_fusion,
+    Q_bottleneck,
+    MoE,
+)
+from generator import (  # type: ignore  # noqa: E402
+    InfoGANGenerator,
+    ClusterGANGenerator,
+    Pix2PixGenerator,
+    BicycleGANGenerator,
+    DiscoGANGenerator,
+)
+from process_data import MyData, build_label_map  # type: ignore  # noqa: E402
+from config import CONFIG  # type: ignore  # noqa: E402
 
 # ============================= Helper / Utilities ============================= #
 
@@ -240,16 +249,16 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
 
     # GAN luôn bật
     img_size = args.target_size if args.target_size > 0 else 224
-    if args.gen_model == "infogan":
-        generator = InfoGANGenerator(latent_dim=args.gan_latent, img_size=img_size)
-    elif args.gen_model == "clustergan":
-        generator = ClusterGANGenerator(latent_dim=args.gan_latent, img_size=img_size)
-    elif args.gen_model == "pix2pix":
-        generator = Pix2PixGenerator(latent_dim=args.gan_latent, img_size=img_size)
-    elif args.gen_model == "bicyclegan":
-        generator = BicycleGANGenerator(latent_dim=args.gan_latent, img_size=img_size)
-    else:  # discogan
-        generator = DiscoGANGenerator(latent_dim=args.gan_latent, img_size=img_size)
+
+    GEN_CLASS = {
+        "infogan": InfoGANGenerator,
+        "clustergan": ClusterGANGenerator,
+        "pix2pix": Pix2PixGenerator,
+        "bicyclegan": BicycleGANGenerator,
+        "discogan": DiscoGANGenerator,
+    }
+    gen_cls = GEN_CLASS[args.gen_model]
+    generator = gen_cls(latent_dim=args.gan_latent, img_size=img_size)
     generator = generator.to(device)
     g_opt = AdamW(generator.parameters(), lr=args.gan_lr, weight_decay=1e-4)
     g_scaler = GradScaler(enabled=CONFIG.mixed_precision)
@@ -448,6 +457,56 @@ def test(model, dataloader):  # retained for API compatibility
     )
 
 
+def build_discriminator(name: str, num_classes: int, device: torch.device):
+    """Return DataParallel-wrapped discriminator model by name."""
+
+    if name == "Q_bottleneck":
+
+        class Wrapper(nn.Module):
+            def __init__(self, inner):
+                super().__init__()
+                self.inner = inner
+
+            def forward(self, img, input_ids, attention_mask):
+                logits, aux_loss, q1, q2 = self.inner(input_ids, attention_mask, img)
+                return logits, q1, q2
+
+        model = torch.nn.DataParallel(Wrapper(Q_bottleneck())).to(device)
+        return model
+
+    if name == "MoE":
+
+        class MoEWrapper(nn.Module):
+            def __init__(self, inner):
+                super().__init__()
+                self.inner = inner
+
+            def forward(self, img, input_ids, attention_mask):
+                logits, aux_loss = self.inner(input_ids, attention_mask, img)
+                # duplicate logits to mimic (img,text) feats for ITC compatibility
+                return logits, logits, logits
+
+        model = torch.nn.DataParallel(MoE(num_classes=num_classes)).to(device)
+        return torch.nn.DataParallel(MoEWrapper(MoE(num_classes=num_classes))).to(
+            device
+        )
+
+    DISC_MAP = {
+        "Q_cons_fusion": lambda: torch.nn.DataParallel(
+            Q_cons_fusion(num_classes=num_classes)
+        ).to(device),
+        "MLP_fusion": lambda: torch.nn.DataParallel(
+            MLP_fusion(num_classes=num_classes)
+        ).to(device),
+        "Q_former_fusion": lambda: torch.nn.DataParallel(
+            Q_former_fusion(num_classes=num_classes)
+        ).to(device),
+    }
+    if name not in DISC_MAP:
+        raise ValueError(f"Unknown discriminator: {name}")
+    return DISC_MAP[name]()
+
+
 if __name__ == "__main__":
     args = args()
     # Override CONFIG with CLI for reproducibility consistency
@@ -557,41 +616,7 @@ if __name__ == "__main__":
         f"CPUs: {cpu_ct} | Train batches: {len(train_data)} | Test batches: {len(test_data)} | target_size={tgt_size if tgt_size else 'native'} | "
         f"Epochs={CONFIG.epochs} | BatchSize={CONFIG.batch_size} | LR={CONFIG.lr} | Gen={args.gen_model} | Disc={args.disc_model}"
     )
-    # Chọn discriminator
-    selected = args.disc_model
-    if selected == "Q_cons_fusion":
-        model = torch.nn.DataParallel(Q_cons_fusion(num_classes=num_classes)).to(device)
-    elif selected == "MLP_fusion":
-        model = torch.nn.DataParallel(MLP_fusion(num_classes=num_classes)).to(device)
-    elif selected == "Q_former_fusion":
-        model = torch.nn.DataParallel(Q_former_fusion(num_classes=num_classes)).to(
-            device
-        )
-    elif selected == "Q_bottleneck":
-
-        class Wrapper(nn.Module):
-            def __init__(self, inner):
-                super().__init__()
-                self.inner = inner
-
-            def forward(self, img, input_ids, attention_mask):
-                logits, aux_loss, q1, q2 = self.inner(input_ids, attention_mask, img)
-                return logits, q1, q2
-
-        model = torch.nn.DataParallel(Wrapper(Q_bottleneck())).to(device)
-    else:  # MoE standalone (selected == "MoE" or other mapped to MoE)
-
-        class MoEWrapper(nn.Module):
-            def __init__(self, inner):
-                super().__init__()
-                self.inner = inner
-
-            def forward(self, img, input_ids, attention_mask):
-                logits, aux_loss = self.inner(input_ids, attention_mask, img)
-                return logits, logits, logits
-
-        model = torch.nn.DataParallel(
-            MoEWrapper(MoE_model(num_classes=num_classes))
-        ).to(device)
+    # Chọn discriminator (mapping-based)
+    model = build_discriminator(args.disc_model, num_classes, device)
 
     unified_train(model, train_data, test_data, args, gen_label_index)
