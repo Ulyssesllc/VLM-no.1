@@ -59,7 +59,7 @@ python utils/train.py \
   --disc_model Q_cons_fusion \
   --gen_model infogan \
   --epochs 15 \
-  --batch_size 8 \
+  --batch_size 16 \
   --lr 1e-4
 ```
 Common useful flags:
@@ -82,7 +82,7 @@ python utils/train.py \
   --gen_weight 0.4 \
   --gen_label fake \
   --epochs 20 \
-  --batch_size 8
+  --batch_size 16
 ```
 
 ### Checkpoints
