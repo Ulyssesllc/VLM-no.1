@@ -7,7 +7,8 @@ from typing import Optional
 @dataclass
 class config:
     seed: int = 42
-    batch_size: int = 256
+    # Reduced default batch size for safer GPU memory usage; override via CLI if needed
+    batch_size: int = 16
     epochs: int = 15
     lr: float = 1e-4
     weight_decay: float = 0.01
