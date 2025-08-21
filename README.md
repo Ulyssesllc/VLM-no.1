@@ -164,5 +164,20 @@ python utils/train.py --epochs 2 --batch_size 4 --synthetic_ratio 0.1
 python utils/visualize_adidas.py --checkpoint checkpoints/last_model_gan.pth --num-samples 4 --export-grid --save-dir demo_viz
 ```
 
+## 12. Inference ảnh đơn lẻ
+Script: `utils/infer_single.py`
+```
+python utils/infer_single.py \
+  --checkpoint checkpoints/best_model_gan.pth \
+  --disc_model Q_cons_fusion \
+  --image path/to/image.jpg \
+  --train-csv adidas_dataset/labels.csv \
+  --top-k 5 \
+  --positive-label fake \
+  --threshold 0.4 \
+  --save-overlay out/overlay.jpg \
+  --json-out out/result.json
+```
+Tạo overlay và JSON nếu cung cấp các tham số tương ứng. Nếu multi-class và `--decision-mode top1` decision = lớp xác suất cao nhất; với binary + `--decision-mode threshold` dùng p_pos >= threshold.
+
 ---
-Nếu cần bổ sung / rút gọn thêm cho README, cứ yêu cầu thêm nhé.

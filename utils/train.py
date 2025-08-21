@@ -487,6 +487,8 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
                 "best_metric": best_score,
                 "select_metric": args.select_metric,
                 "config": CONFIG.__dict__,
+                "disc_model": args.disc_model,
+                "gen_model": args.gen_model,
             }
             torch.save(ckpt, os.path.join(CONFIG.checkpoint_dir, "best_model_gan.pth"))
             print(
@@ -506,6 +508,8 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
                         "generator_state": generator.state_dict(),
                         "best_metric": best_score,
                         "select_metric": args.select_metric,
+                        "disc_model": args.disc_model,
+                        "gen_model": args.gen_model,
                     },
                     os.path.join(CONFIG.checkpoint_dir, "early_stop_model_gan.pth"),
                 )
@@ -519,6 +523,8 @@ def unified_train(model, dataloader, eval_loader, args, gen_label_index=None):
             "g_optimizer_state": g_opt.state_dict(),
             "best_metric": best_score,
             "select_metric": args.select_metric,
+            "disc_model": args.disc_model,
+            "gen_model": args.gen_model,
         }
         torch.save(ckpt_last, os.path.join(CONFIG.checkpoint_dir, "last_model_gan.pth"))
         if stop_training:
